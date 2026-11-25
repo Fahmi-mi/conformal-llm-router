@@ -1,0 +1,12 @@
+random_state: 42
+cal_ratio: 0.2
+default_alpha: 0.10
+alpha_min: 0.01
+alpha_max: 0.30
+alpha_step: 0.01
+benchmark_alphas:
+  - 0.05
+  - 0.10
+embed_model: "sentence-transformers/all-MiniLM-L6-v2"
+nli_model: "cross-encoder/nli-deberta-v3-small"
+judge_sample_size: 300

@@ -41,11 +41,11 @@
 **Interfaces:**
 - Produces: `pyproject.toml`, `uv.lock`, `config/ragtruth_conformal.yaml`, `config/routerbench.yaml`, `.env.example`
 
-- [ ] **Step 1: Verify `uv` is installed (install if missing) and initialize Git**
+- [ ] **Step 1: Verify `mise`-managed `uv` is available (do not install a second `uv`) and initialize Git + `origin` remote**
 
-Run: `which uv || curl -LsSf https://astral.sh/uv/install.sh | sh`
-Expected: `uv --version` prints installed version.
-Then run: `git init -b main`
+Run: `/home/fahmi/.local/share/mise/shims/uv --version`
+Expected: prints `uv ...` from `mise`.
+Then run: `git init -b main && git remote add origin https://github.com/Fahmi-mi/conformal-llm-router.git`
 
 - [ ] **Step 2: Create `chore/project-setup` branch, `.gitignore`, `.env.example`, and directory scaffolds**
 
