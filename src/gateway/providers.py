@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,9 @@ class GatewaySettings(BaseSettings):
 
     gateway_alpha_default: float = Field(default=0.10, ge=0.01, le=0.30)
     gateway_lambda_default: float = Field(default=0.45, ge=0.0, le=1.0)
-    cors_origins: list[str] = Field(default_factory=lambda: list(_DEFAULT_CORS_ORIGINS))
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(_DEFAULT_CORS_ORIGINS)
+    )
 
     artifacts_dir: Path = Path("artifacts")
     telemetry_db_path: Path = Path("data/telemetry.db")
@@ -91,6 +94,10 @@ class GatewaySettings(BaseSettings):
             stripped = value.strip()
             if not stripped:
                 return list(_DEFAULT_CORS_ORIGINS)
+            if stripped.startswith("["):
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
             return [item.strip() for item in stripped.split(",") if item.strip()]
         return [str(item).strip() for item in value if str(item).strip()]
 
@@ -110,6 +117,22 @@ class ProviderResult:
 
 def _approx_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
+
+
+def _extract_text(raw: Any, provider: str) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"Provider '{provider}' returned null or empty completion.")
+    return raw.strip()
+
+
+def _summarize_provider_error(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.TransportError):
+        return f"transport error ({type(exc).__name__})"
+    return type(exc).__name__
 
 
 def _compute_cost_usd(provider: str, input_tokens: int, output_tokens: int) -> float:
@@ -182,9 +205,7 @@ class ProviderRouter:
         )
         resp.raise_for_status()
         data = resp.json()
-        content = str(data["choices"][0]["message"]["content"]).strip()
-        if not content:
-            raise ValueError(f"Provider '{provider}' returned an empty completion.")
+        content = _extract_text(data["choices"][0]["message"].get("content"), provider)
         usage = data.get("usage") or {}
         in_tok = int(usage.get("prompt_tokens") or _approx_tokens(prompt_text))
         out_tok = int(usage.get("completion_tokens") or _approx_tokens(content))
@@ -202,7 +223,7 @@ class ProviderRouter:
         url = _GEMINI_URL_TEMPLATE.format(model=model)
         resp = await client.post(
             url,
-            params={"key": self.settings.gemini_api_key},
+            headers={"x-goog-api-key": self.settings.gemini_api_key},
             json={
                 "systemInstruction": {"parts": [{"text": system_prompt}]},
                 "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
@@ -212,9 +233,12 @@ class ProviderRouter:
         resp.raise_for_status()
         data = resp.json()
         parts = data["candidates"][0]["content"]["parts"]
-        content = "".join(str(part.get("text", "")) for part in parts).strip()
-        if not content:
-            raise ValueError("Provider 'gemini' returned an empty completion.")
+        text_chunks = [
+            part["text"]
+            for part in parts
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        ]
+        content = _extract_text("".join(text_chunks), "gemini")
         usage = data.get("usageMetadata") or {}
         in_tok = int(usage.get("promptTokenCount") or _approx_tokens(user_prompt))
         out_tok = int(usage.get("candidatesTokenCount") or _approx_tokens(content))
@@ -240,9 +264,7 @@ class ProviderRouter:
         )
         resp.raise_for_status()
         data = resp.json()
-        content = str(data["message"]["content"]).strip()
-        if not content:
-            raise ValueError("Provider 'ollama' returned an empty completion.")
+        content = _extract_text(data["message"].get("content"), "ollama")
         in_tok = int(data.get("prompt_eval_count") or _approx_tokens(prompt_text))
         out_tok = int(data.get("eval_count") or _approx_tokens(content))
         return content, model, in_tok, out_tok
@@ -335,8 +357,9 @@ class ProviderRouter:
                     frontier_cost_usd=_compute_cost_usd("deepseek", in_tok, out_tok),
                 )
             except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
-                logger.warning("Provider '%s' failed for tier '%s': %s", provider, tier, exc)
-                errors.append(f"{provider}: {exc}")
+                summary = _summarize_provider_error(exc)
+                logger.warning("Provider '%s' failed for tier '%s': %s", provider, tier, summary)
+                errors.append(f"{provider}: {summary}")
 
         raise UpstreamUnavailableError(
             f"All providers failed for tier '{tier}': {'; '.join(errors)}"

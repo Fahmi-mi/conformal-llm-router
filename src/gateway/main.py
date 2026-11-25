@@ -6,7 +6,11 @@ import json
 import logging
 import pickle
 import sqlite3
+import threading
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -26,7 +30,6 @@ from src.conformal.calibrator import (
 from src.eval.features import FeatureExtractor
 from src.gateway.cache import SemanticCache
 from src.gateway.providers import (
-    _DEFAULT_CORS_ORIGINS,
     GatewaySettings,
     ProviderRouter,
     UpstreamUnavailableError,
@@ -172,6 +175,46 @@ def _check_valid_cache_hit(
     return True, evidence
 
 
+@dataclass
+class _GatewayRuntime:
+    """Lazy runtime container so importing main or calling create_app performs zero disk I/O."""
+
+    cfg: GatewaySettings
+    store: TelemetryStore | None = None
+    cache: SemanticCache | None = None
+    extractor: FeatureExtractor | None = None
+    calibrator: ConformalBundle | None = None
+    router: RouterBundle | None = None
+    provider_router: ProviderRouter | None = None
+    initialized: bool = False
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def ensure_ready(self) -> None:
+        if self.initialized:
+            return
+        with self._lock:
+            if self.initialized:
+                return
+            if self.store is None:
+                self.store = TelemetryStore(self.cfg.telemetry_db_path)
+            self.store.init_schema()
+            if self.cache is None:
+                self.cache = SemanticCache(
+                    self.cfg.faiss_index_path,
+                    store=self.store,
+                    similarity_threshold=self.cfg.similarity_threshold,
+                )
+            if self.extractor is None:
+                self.extractor = FeatureExtractor()
+            if self.calibrator is None:
+                self.calibrator = _load_pickle_artifact(self.cfg.artifacts_dir / "calibrator.pkl")
+            if self.router is None:
+                self.router = _load_pickle_artifact(self.cfg.artifacts_dir / "router.pkl")
+            if self.provider_router is None:
+                self.provider_router = ProviderRouter(settings=self.cfg)
+            self.initialized = True
+
+
 def create_app(
     settings: GatewaySettings | None = None,
     store: TelemetryStore | None = None,
@@ -181,38 +224,34 @@ def create_app(
     router: RouterBundle | None = None,
     provider_router: ProviderRouter | None = None,
 ) -> FastAPI:
-    """Create the FastAPI gateway application with optional dependency overrides for testing."""
+    """Create the FastAPI gateway application with lazy lifespan initialization and DI."""
     cfg = settings or GatewaySettings()
-    telemetry_store = store or TelemetryStore(cfg.telemetry_db_path)
-    telemetry_store.init_schema()
-    semantic_cache = cache or SemanticCache(
-        cfg.faiss_index_path,
-        store=telemetry_store,
-        similarity_threshold=cfg.similarity_threshold,
+    runtime = _GatewayRuntime(
+        cfg=cfg,
+        store=store,
+        cache=cache,
+        extractor=extractor,
+        calibrator=calibrator,
+        router=router,
+        provider_router=provider_router,
     )
-    feat_extractor = extractor or FeatureExtractor()
-    cal_bundle = (
-        calibrator
-        if calibrator is not None
-        else _load_pickle_artifact(cfg.artifacts_dir / "calibrator.pkl")
-    )
-    rtr_bundle = (
-        router
-        if router is not None
-        else _load_pickle_artifact(cfg.artifacts_dir / "router.pkl")
-    )
-    llm_router = provider_router or ProviderRouter(settings=cfg)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        await run_in_threadpool(runtime.ensure_ready)
+        yield
 
     app = FastAPI(
         title="Conformal LLM Router Gateway",
         version="0.1.0",
         description="Conformal hallucination control and Pareto-optimal LLM routing gateway.",
+        lifespan=lifespan,
     )
+    app.state.runtime = runtime
 
-    cors_origins = list(dict.fromkeys([*_DEFAULT_CORS_ORIGINS, *cfg.cors_origins]))
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=cors_origins,
+        allow_origins=list(cfg.cors_origins),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -224,9 +263,19 @@ def create_app(
     ) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": str(exc)})
 
+    async def _require_ready() -> _GatewayRuntime:
+        if not runtime.initialized:
+            await run_in_threadpool(runtime.ensure_ready)
+        return runtime
+
     @app.post("/v1/query", response_model=QueryResponse)
     async def query_endpoint(req: QueryRequest) -> QueryResponse:
-        if cal_bundle is None or rtr_bundle is None:
+        rt = await _require_ready()
+        assert rt.store is not None
+        assert rt.cache is not None
+        assert rt.extractor is not None
+        assert rt.provider_router is not None
+        if rt.calibrator is None or rt.router is None:
             raise HTTPException(
                 status_code=503,
                 detail="Gateway model artifacts (calibrator.pkl / router.pkl) are not loaded.",
@@ -244,15 +293,15 @@ def create_app(
         )
 
         q_embs, q_meta_df = await run_in_threadpool(
-            feat_extractor.extract_query_features, [req.query]
+            rt.extractor.extract_query_features, [req.query]
         )
         query_emb = q_embs[0]
-        prob_tier1 = float(predict_tier1_probability(rtr_bundle, q_embs, q_meta_df)[0])
+        prob_tier1 = float(predict_tier1_probability(rt.router, q_embs, q_meta_df)[0])
         predicted_tier = select_tier(prob_tier1, lambda_cost_used)
 
         cached_record = None
         if not req.bypass_cache:
-            cached_record = await run_in_threadpool(semantic_cache.lookup, query_emb)
+            cached_record = await run_in_threadpool(rt.cache.lookup, query_emb)
 
         is_hit, hit_evidence = _check_valid_cache_hit(
             cached_record,
@@ -260,7 +309,7 @@ def create_app(
             predicted_tier=predicted_tier,
             lambda_cost_override=req.lambda_cost_override,
             alpha_used=alpha_used,
-            calibrator=cal_bundle,
+            calibrator=rt.calibrator,
         )
 
         request_id = str(uuid4())
@@ -287,7 +336,7 @@ def create_app(
                 "evidence": hit_evidence.model_dump() if hit_evidence is not None else None,
                 "latency_ms": latency_ms,
             }
-            await run_in_threadpool(telemetry_store.insert_request, record)
+            await run_in_threadpool(rt.store.insert_request, record)
             return QueryResponse(
                 request_id=request_id,
                 answer=record["answer_text"],
@@ -307,7 +356,7 @@ def create_app(
                 latency_ms=latency_ms,
             )
 
-        gen_res = await llm_router.generate(predicted_tier, req.query, context_text)
+        gen_res = await rt.provider_router.generate(predicted_tier, req.query, context_text)
         answer = gen_res.answer
         draft_answer: str | None = None
         model_used = gen_res.model_used
@@ -325,8 +374,8 @@ def create_app(
         if context_text is not None:
             calibrated_risk_score, conformal_decision, evidence = await run_in_threadpool(
                 _score_candidate,
-                feat_extractor,
-                cal_bundle,
+                rt.extractor,
+                rt.calibrator,
                 req.query,
                 context_text,
                 answer,
@@ -334,7 +383,7 @@ def create_app(
             )
 
             if conformal_decision == "ABSTAIN" and predicted_tier == "tier1":
-                res_tier2 = await llm_router.generate("tier2", req.query, context_text)
+                res_tier2 = await rt.provider_router.generate("tier2", req.query, context_text)
                 escalated_from_tier1 = True
                 tier_used = "tier2"
                 model_used = res_tier2.model_used
@@ -345,8 +394,8 @@ def create_app(
 
                 calibrated_risk_score, conformal_decision, evidence = await run_in_threadpool(
                     _score_candidate,
-                    feat_extractor,
-                    cal_bundle,
+                    rt.extractor,
+                    rt.calibrator,
                     req.query,
                     context_text,
                     res_tier2.answer,
@@ -383,9 +432,9 @@ def create_app(
             "evidence": evidence.model_dump() if evidence is not None else None,
             "latency_ms": latency_ms,
         }
-        await run_in_threadpool(telemetry_store.insert_request, record)
+        await run_in_threadpool(rt.store.insert_request, record)
         if conformal_decision != "ABSTAIN":
-            await run_in_threadpool(semantic_cache.put, query_emb, record)
+            await run_in_threadpool(rt.cache.put, query_emb, record)
 
         return QueryResponse(
             request_id=request_id,
@@ -408,7 +457,9 @@ def create_app(
 
     @app.post("/v1/evaluate-risk", response_model=EvaluateRiskResponse)
     async def evaluate_risk_endpoint(req: EvaluateRiskRequest) -> EvaluateRiskResponse:
-        if cal_bundle is None:
+        rt = await _require_ready()
+        assert rt.extractor is not None
+        if rt.calibrator is None:
             raise HTTPException(
                 status_code=503,
                 detail="Conformal calibrator artifact (calibrator.pkl) is not loaded.",
@@ -418,8 +469,8 @@ def create_app(
         )
         risk_score, decision, evidence = await run_in_threadpool(
             _score_candidate,
-            feat_extractor,
-            cal_bundle,
+            rt.extractor,
+            rt.calibrator,
             req.query,
             req.context,
             req.candidate_answer,
@@ -439,12 +490,14 @@ def create_app(
         alpha: float | None = Query(default=None, ge=0.01, le=0.30),
         lambda_cost: float | None = Query(default=None, ge=0.0, le=1.0),
     ) -> ParetoTelemetryResponse:
+        rt = await _require_ready()
+        assert rt.store is not None
         alpha_val = float(alpha if alpha is not None else cfg.gateway_alpha_default)
         lambda_val = float(
             lambda_cost if lambda_cost is not None else cfg.gateway_lambda_default
         )
         summary = await run_in_threadpool(
-            telemetry_store.aggregate_pareto, alpha_val, lambda_val
+            rt.store.aggregate_pareto, alpha_val, lambda_val
         )
         summary["offline_curve"] = _load_offline_pareto_curve(
             cfg.artifacts_dir / "pareto_sweep.json"
@@ -460,8 +513,10 @@ def create_app(
         cache_hit: bool | None = None,
         q: str | None = None,
     ) -> AuditListResponse:
+        rt = await _require_ready()
+        assert rt.store is not None
         items, total = await run_in_threadpool(
-            telemetry_store.query_audit,
+            rt.store.query_audit,
             limit=limit,
             offset=offset,
             decision=decision,
@@ -487,25 +542,31 @@ def create_app(
 
     @app.get("/health", response_model=HealthResponse)
     async def health_endpoint() -> HealthResponse:
+        rt = await _require_ready()
+        assert rt.store is not None
+        assert rt.cache is not None
+        assert rt.extractor is not None
+        assert rt.provider_router is not None
+
         sqlite_ok = False
         try:
-            with telemetry_store._connect() as conn:
+            with rt.store._connect() as conn:
                 conn.execute("SELECT 1").fetchone()
             sqlite_ok = True
         except (sqlite3.Error, OSError):
             sqlite_ok = False
 
-        faiss_ok = getattr(semantic_cache, "_index", None) is not None
+        faiss_ok = getattr(rt.cache, "_index", None) is not None
         artifacts = {
-            "calibrator": cal_bundle is not None,
-            "router": rtr_bundle is not None,
+            "calibrator": rt.calibrator is not None,
+            "router": rt.router is not None,
         }
         models = {
-            "embedder_loaded": getattr(feat_extractor, "_embedder", None) is not None,
-            "nli_loaded": getattr(feat_extractor, "_nli_model", None) is not None,
+            "embedder_loaded": getattr(rt.extractor, "_embedder", None) is not None,
+            "nli_loaded": getattr(rt.extractor, "_nli_model", None) is not None,
         }
         storage = {"sqlite": sqlite_ok, "faiss": faiss_ok}
-        providers = llm_router.available_providers()
+        providers = rt.provider_router.available_providers()
         is_ok = artifacts["calibrator"] and artifacts["router"] and sqlite_ok and faiss_ok
 
         return HealthResponse(

@@ -566,3 +566,125 @@ def test_auxiliary_endpoints_empty_and_populated_states(tmp_path: Path) -> None:
     )
     assert a_pop.total == 1
     assert a_pop.items[0].conformal_decision == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_gemini_uses_header_and_503_never_leaks_api_key(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret_key = "AIza-super-secret-gemini-key"
+    captured_headers: dict[str, str] = {}
+    captured_query: str = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_query
+        if "generativelanguage.googleapis.com" in str(request.url):
+            captured_headers.update(dict(request.headers))
+            captured_query = request.url.query.decode("utf-8")
+            return httpx.Response(503, json={"error": "upstream down"})
+        return httpx.Response(503, json={"error": "down"})
+
+    settings = GatewaySettings(
+        groq_api_key=None,
+        gemini_api_key=secret_key,
+        ollama_base_url=None,
+        deepseek_api_key=None,
+        artifacts_dir=tmp_path / "artifacts",
+        telemetry_db_path=tmp_path / "telemetry.db",
+        faiss_index_path=tmp_path / "faiss.index",
+    )
+    calibrator, router = _make_bundles()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as async_client:
+        app = create_app(
+            settings=settings,
+            extractor=FeatureExtractor(embedder=_StubEmbedder(), nli_model=_StubNLIModel()),
+            calibrator=calibrator,
+            router=router,
+            provider_router=ProviderRouter(settings=settings, client=async_client),
+        )
+        with TestClient(app) as client:
+            resp = client.post("/v1/query", json={"query": "Test secret safety"})
+
+    assert resp.status_code == 503
+    assert captured_headers.get("x-goog-api-key") == secret_key
+    assert "key=" not in captured_query
+    assert secret_key not in resp.text
+    assert secret_key not in resp.json()["detail"]
+    assert secret_key not in caplog.text
+
+
+def test_cors_origins_env_comma_separated_and_strict_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CORS_ORIGINS", "https://dashboard.example.com, https://admin.example.com")
+    settings = GatewaySettings(
+        _env_file=None,
+        artifacts_dir=tmp_path / "artifacts",
+        telemetry_db_path=tmp_path / "telemetry.db",
+        faiss_index_path=tmp_path / "faiss.index",
+    )
+    assert settings.cors_origins == ["https://dashboard.example.com", "https://admin.example.com"]
+
+    app = create_app(settings=settings)
+    client = TestClient(app)
+    allowed = client.options(
+        "/health",
+        headers={
+            "Origin": "https://dashboard.example.com",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert allowed.headers.get("access-control-allow-origin") == "https://dashboard.example.com"
+
+    disallowed = client.options(
+        "/health",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert disallowed.headers.get("access-control-allow-origin") is None
+
+
+@pytest.mark.asyncio
+async def test_null_completion_content_rejected_and_triggers_fallback() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "groq.com" in url:
+            return httpx.Response(200, json={"choices": [{"message": {"content": None}}]})
+        if "generativelanguage.googleapis.com" in url:
+            return httpx.Response(
+                200, json={"candidates": [{"content": {"parts": [{"text": None}]}}]}
+            )
+        if "localhost:11434/api/chat" in url:
+            return httpx.Response(200, json={"message": {"content": None}})
+        return httpx.Response(500)
+
+    settings = GatewaySettings(
+        groq_api_key="g-key",
+        gemini_api_key="gem-key",
+        ollama_base_url="http://localhost:11434",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as async_client:
+        pr = ProviderRouter(settings=settings, client=async_client)
+        with pytest.raises(UpstreamUnavailableError):
+            await pr.generate("tier1", "Hello", None)
+
+
+def test_importing_gateway_main_performs_zero_disk_io(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("TELEMETRY_DB_PATH", str(tmp_path / "data" / "telemetry.db"))
+    monkeypatch.setenv("FAISS_INDEX_PATH", str(tmp_path / "data" / "faiss.index"))
+    sys.modules.pop("src.gateway.main", None)
+
+    importlib.import_module("src.gateway.main")
+
+    assert not (tmp_path / "data").exists()
+    assert not (tmp_path / "data" / "telemetry.db").exists()
+    assert not (tmp_path / "data" / "faiss.index").exists()
