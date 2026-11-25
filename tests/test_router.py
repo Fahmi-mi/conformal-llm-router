@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import pickle
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from src.eval.features import QUERY_META_COLUMNS
+from src.router.pareto import compute_pareto_frontier, run_router_pipeline
 from src.router.trainer import (
     RouterBundle,
     predict_tier1_probability,
@@ -140,3 +144,159 @@ def test_validation_errors_pickle_and_full_query_meta_columns() -> None:
 
     with pytest.raises(ValueError, match="missing|columns"):
         predict_tier1_probability(bundle, embs[:4], df.iloc[:4].drop(columns=["char_len"]))
+
+
+def test_compute_pareto_frontier_endpoints_auc_and_baselines() -> None:
+    df_eval = pd.DataFrame(
+        {
+            "tier1_quality": [0.95, 0.90, 0.20, 0.15],
+            "tier2_quality": [0.95, 0.95, 0.90, 0.95],
+            "tier1_cost": [0.0001, 0.0001, 0.0001, 0.0001],
+            "tier2_cost": [0.0100, 0.0100, 0.0100, 0.0100],
+        }
+    )
+    probs = np.array([0.9, 0.7, 0.3, 0.1], dtype=float)
+    lambdas = [0.0, 0.2, 0.45, 0.8, 1.0]
+
+    result = compute_pareto_frontier(probs, df_eval, lambdas)
+    curve = result["curve"]
+    assert len(curve) == len(lambdas)
+
+    by_lam = {pt["lambda_cost"]: pt for pt in curve}
+    baselines = result["baselines"]
+    assert set(baselines.keys()) == {
+        "always_frontier",
+        "always_small",
+        "random_router",
+        "learned_pareto_router",
+    }
+
+    assert np.isclose(by_lam[0.0]["avg_cost"], baselines["always_frontier"]["avg_cost"])
+    assert np.isclose(by_lam[0.0]["avg_quality"], baselines["always_frontier"]["avg_quality"])
+    assert np.isclose(by_lam[1.0]["avg_cost"], baselines["always_small"]["avg_cost"])
+    assert np.isclose(by_lam[1.0]["avg_quality"], baselines["always_small"]["avg_quality"])
+
+    tier1_rates = [pt["tier1_rate"] for pt in curve]
+    avg_costs = [pt["avg_cost"] for pt in curve]
+    assert tier1_rates == sorted(tier1_rates)
+    assert avg_costs == sorted(avg_costs, reverse=True)
+
+    assert 0.0 <= result["auc_qc"] <= 1.0
+    assert result["cost_savings_at_95pct_quality"] is not None
+    assert np.isclose(result["cost_savings_at_95pct_quality"], by_lam[0.45]["cost_savings"])
+    assert np.isclose(baselines["learned_pareto_router"]["avg_cost"], by_lam[0.45]["avg_cost"])
+    assert np.isclose(
+        baselines["learned_pareto_router"]["avg_quality"], by_lam[0.45]["avg_quality"]
+    )
+
+    no_95 = compute_pareto_frontier(probs, df_eval, [1.0])
+    assert no_95["cost_savings_at_95pct_quality"] is None
+
+
+def test_compute_pareto_frontier_zero_tier2_cost_safe() -> None:
+    df_zero = pd.DataFrame(
+        {
+            "tier1_quality": [0.8, 0.4],
+            "tier2_quality": [0.9, 0.9],
+            "tier1_cost": [0.0, 0.0],
+            "tier2_cost": [0.0, 0.0],
+        }
+    )
+    probs = np.array([0.85, 0.2], dtype=float)
+    result = compute_pareto_frontier(probs, df_zero, [0.0, 0.5, 1.0])
+
+    assert result["auc_qc"] == 0.0
+    assert all(pt["normalized_cost"] == 0.0 for pt in result["curve"])
+    assert all(pt["cost_savings"] == 0.0 for pt in result["curve"])
+    assert result["baselines"]["always_frontier"]["normalized_cost"] == 0.0
+    assert result["baselines"]["always_small"]["cost_savings"] == 0.0
+
+
+def _write_synthetic_routerbench_parquet(path: Path, include_ood: bool = True) -> None:
+    rng = np.random.default_rng(42)
+    rows: list[dict[str, object]] = []
+    splits = [("train", 30), ("test", 12)]
+    if include_ood:
+        splits.append(("ood_test", 8))
+
+    idx = 0
+    for split_name, count in splits:
+        for _ in range(count):
+            token_count = int(rng.integers(5, 60))
+            tier1_suff = bool(token_count < 30)
+            t1_q = 0.9 if tier1_suff else 0.2
+            t2_q = 0.92
+            rows.append(
+                {
+                    "sample_id": f"s_{idx}",
+                    "eval_name": "mbpp" if split_name == "ood_test" else "mmlu",
+                    "split": split_name,
+                    "tier1_quality": t1_q,
+                    "tier2_quality": t2_q,
+                    "tier1_cost": 0.0001,
+                    "tier2_cost": 0.005,
+                    "tier1_sufficient": tier1_suff,
+                    "char_len": token_count * 4,
+                    "token_count": token_count,
+                    "sentence_count": 2,
+                    "question_mark_count": 1,
+                    "digit_ratio": 0.05,
+                    "uppercase_ratio": 0.1,
+                    "avg_word_len": 4.5,
+                    "query_embedding": rng.normal(size=16).astype(np.float32).tolist(),
+                }
+            )
+            idx += 1
+    pd.DataFrame(rows).to_parquet(path, index=False)
+
+
+def test_run_router_pipeline_exports_artifacts_and_handles_ood(tmp_path: Path) -> None:
+    parquet_with_ood = tmp_path / "routerbench_with_ood.parquet"
+    _write_synthetic_routerbench_parquet(parquet_with_ood, include_ood=True)
+
+    cfg_path = tmp_path / "routerbench.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "random_state": 42,
+                "default_lambda_cost": 0.45,
+                "lambda_min": 0.0,
+                "lambda_max": 1.0,
+                "lambda_step": 0.25,
+                "n_pca": 8,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    artifacts_dir = tmp_path / "artifacts"
+    router_path, sweep_path = run_router_pipeline(parquet_with_ood, cfg_path, artifacts_dir)
+    assert router_path.exists()
+    assert sweep_path.exists()
+
+    with router_path.open("rb") as fh:
+        bundle = pickle.load(fh)
+    assert isinstance(bundle, RouterBundle)
+    assert bundle.default_lambda == 0.45
+
+    payload = json.loads(sweep_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "ready"
+    assert payload["default_lambda"] == 0.45
+    assert payload["ood_available"] is True
+    assert len(payload["curve"]) == 5
+    assert len(payload["ood_curve"]) == 5
+    assert set(payload["baselines"].keys()) == {
+        "always_frontier",
+        "always_small",
+        "random_router",
+        "learned_pareto_router",
+    }
+    assert 0.0 <= payload["auc_qc"] <= 1.0
+
+    parquet_no_ood = tmp_path / "routerbench_no_ood.parquet"
+    _write_synthetic_routerbench_parquet(parquet_no_ood, include_ood=False)
+    artifacts_no_ood = tmp_path / "artifacts_no_ood"
+    _, sweep_no_ood_path = run_router_pipeline(parquet_no_ood, cfg_path, artifacts_no_ood)
+    payload_no_ood = json.loads(sweep_no_ood_path.read_text(encoding="utf-8"))
+    assert payload_no_ood["ood_available"] is False
+    assert payload_no_ood["ood_curve"] == []
