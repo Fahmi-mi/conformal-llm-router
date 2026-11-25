@@ -417,3 +417,53 @@ def test_telemetry_store_aggregate_pareto_empty_and_populated(tmp_path: Path) ->
     assert agg["p50_latency_ms"] == pytest.approx(25.0)
     assert agg["p95_latency_ms"] == pytest.approx(38.5)
     assert len(agg["live_points"]) == 2
+
+
+def test_telemetry_store_closes_connections_and_pareto_uses_single_projected_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    opened: list[sqlite3.Connection] = []
+    closed_count = 0
+    executed_sql: list[str] = []
+
+    class TrackingConnection(sqlite3.Connection):
+        def execute(self, sql: str, parameters: object = (), /) -> sqlite3.Cursor:
+            executed_sql.append(sql)
+            return super().execute(sql, parameters)
+
+        def close(self) -> None:
+            nonlocal closed_count
+            closed_count += 1
+            super().close()
+
+    real_connect = sqlite3.connect
+
+    def _tracked_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        kwargs["factory"] = TrackingConnection
+        conn = real_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr("src.gateway.storage.sqlite3.connect", _tracked_connect)
+
+    store = TelemetryStore(tmp_path / "tracked.db")
+    store.init_schema()
+    store.insert_request(_make_record("t1"))
+    store.get_request("t1")
+    store.query_audit()
+    store.register_cache_entry(0, "t1")
+    store.get_cached_request_by_faiss_id(0)
+
+    executed_sql.clear()
+    agg = store.aggregate_pareto(alpha=0.10, lambda_cost=0.45)
+
+    assert agg["total_requests"] == 1
+    assert len(opened) == 7
+    assert closed_count == len(opened)
+    assert len(executed_sql) == 1
+    assert "SELECT *" not in executed_sql[0]
+    for excluded_col in ("query_text", "context_text", "answer_text", "draft_answer", "evidence_json"):
+        assert excluded_col not in executed_sql[0]
+

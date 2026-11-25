@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -69,14 +71,16 @@ class TelemetryStore:
         self.db_path = Path(db_path)
         self._lock = threading.Lock()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        with self._lock, closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            with conn:
+                yield conn
 
     def init_schema(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute(
                 """
@@ -186,7 +190,7 @@ class TelemetryStore:
             evidence_json,
             float(record["latency_ms"]),
         )
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO requests (
@@ -201,7 +205,7 @@ class TelemetryStore:
             )
 
     def get_request(self, request_id: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM requests WHERE request_id = ?",
                 (request_id,),
@@ -235,7 +239,7 @@ class TelemetryStore:
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             total = int(
                 conn.execute(
                     f"SELECT COUNT(*) FROM requests {where_sql}",
@@ -250,18 +254,30 @@ class TelemetryStore:
         return [self._row_to_dict(row) for row in rows], total
 
     def aggregate_pareto(self, alpha: float, lambda_cost: float) -> dict[str, Any]:
-        with self._lock, self._connect() as conn:
-            filtered_rows = conn.execute(
-                """
-                SELECT * FROM requests
-                WHERE ABS(alpha_used - ?) < 1e-6 AND ABS(lambda_cost_used - ?) < 1e-6
-                """,
-                (float(alpha), float(lambda_cost)),
-            ).fetchall()
+        target_alpha = float(alpha)
+        target_lambda = float(lambda_cost)
+        with self._connect() as conn:
             all_rows = conn.execute(
-                "SELECT * FROM requests ORDER BY lambda_cost_used ASC, alpha_used ASC"
+                """
+                SELECT
+                    cache_hit,
+                    conformal_decision,
+                    tier,
+                    estimated_cost_usd,
+                    frontier_cost_usd,
+                    latency_ms,
+                    alpha_used,
+                    lambda_cost_used
+                FROM requests
+                """
             ).fetchall()
 
+        filtered_rows = [
+            row
+            for row in all_rows
+            if abs(float(row["alpha_used"]) - target_alpha) < 1e-6
+            and abs(float(row["lambda_cost_used"]) - target_lambda) < 1e-6
+        ]
         summary = _compute_metrics(filtered_rows)
         grouped: dict[tuple[float, float], list[sqlite3.Row]] = {}
         for row in all_rows:
@@ -269,7 +285,9 @@ class TelemetryStore:
             grouped.setdefault(key, []).append(row)
 
         live_points: list[dict[str, Any]] = []
-        for (grp_alpha, grp_lambda), grp_rows in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
+        for (grp_alpha, grp_lambda), grp_rows in sorted(
+            grouped.items(), key=lambda item: (item[0][1], item[0][0])
+        ):
             metrics = _compute_metrics(grp_rows)
             live_points.append(
                 {
@@ -281,15 +299,15 @@ class TelemetryStore:
 
         return {
             **summary,
-            "alpha_filter": float(alpha),
-            "lambda_cost_filter": float(lambda_cost),
+            "alpha_filter": target_alpha,
+            "lambda_cost_filter": target_lambda,
             "live_points": live_points,
             "offline_curve": [],
         }
 
     def register_cache_entry(self, faiss_id: int, request_id: str) -> None:
         created_at = datetime.now(UTC).isoformat()
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO cache_entries (faiss_id, request_id, created_at)
@@ -299,7 +317,7 @@ class TelemetryStore:
             )
 
     def get_cached_request_by_faiss_id(self, faiss_id: int) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT r.*
