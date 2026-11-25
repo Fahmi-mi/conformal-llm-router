@@ -25,6 +25,7 @@ from sklearn.model_selection import train_test_split
 MAX_JUDGE_SAMPLE_SIZE = 300
 POSITION_SWAP_MARKER = "[ORDER: RESPONSE_FIRST]"
 _FLOAT_RE = re.compile(r"[-+]?\d*\.?\d+")
+_REPO_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 _PROVIDER_CONFIGS: dict[str, dict[str, str]] = {
     "deepseek": {
@@ -236,8 +237,14 @@ def build_judge_messages(prompt: str, context: str, response: str) -> list[dict[
     ]
 
 
+def _validate_and_clip_score(val: float) -> float:
+    if not np.isfinite(val):
+        raise ValueError(f"Judge score must be finite, got {val!r}")
+    return float(np.clip(val, 0.0, 1.0))
+
+
 def _parse_judge_score(content: str) -> float:
-    """Extract a [0, 1] float score from JSON or plain-text judge output."""
+    """Extract a finite [0, 1] float score from JSON or plain-text judge output."""
     stripped = content.strip()
     candidates = [stripped]
     brace_match = re.search(r"\{.*?\}", stripped, flags=re.DOTALL)
@@ -247,24 +254,34 @@ def _parse_judge_score(content: str) -> float:
     for candidate in candidates:
         try:
             parsed = json.loads(candidate)
-            if isinstance(parsed, dict) and "score" in parsed:
-                return float(np.clip(float(parsed["score"]), 0.0, 1.0))
-            if isinstance(parsed, (int, float)):
-                return float(np.clip(float(parsed), 0.0, 1.0))
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and "score" in parsed:
+            try:
+                val = float(parsed["score"])
+            except (TypeError, ValueError):
+                continue
+            return _validate_and_clip_score(val)
+        if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+            return _validate_and_clip_score(float(parsed))
 
     match = _FLOAT_RE.search(stripped)
     if not match:
         raise ValueError(f"Unable to parse judge score from response: {stripped!r}")
-    return float(np.clip(float(match.group(0)), 0.0, 1.0))
+    return _validate_and_clip_score(float(match.group(0)))
 
 
 def _resolve_api_credentials(env_file: Path | None = Path(".env")) -> tuple[str, str] | None:
     """Resolve (provider, api_key) from os.environ or .env without fabricating credentials."""
     file_env: dict[str, str | None] = {}
-    if env_file is not None and env_file.exists():
-        file_env = dotenv_values(env_file)
+    candidate_env: Path | None = None
+    if env_file is not None:
+        if env_file.exists():
+            candidate_env = env_file
+        elif env_file == Path(".env") and _REPO_ENV_FILE.exists():
+            candidate_env = _REPO_ENV_FILE
+    if candidate_env is not None:
+        file_env = dotenv_values(candidate_env)
 
     for provider, cfg in _PROVIDER_CONFIGS.items():
         env_var = cfg["env_var"]
@@ -358,7 +375,12 @@ def _stratified_sample(
     strat_joint = df["task_type"].astype(str) + "__" + df["has_hallucination"].astype(int).astype(str)
     for strat_col in (strat_joint, df["task_type"].astype(str)):
         counts = strat_col.value_counts()
-        if len(counts) > 1 and counts.min() >= 2 and target_n >= len(counts):
+        if (
+            len(counts) > 1
+            and counts.min() >= 2
+            and target_n >= len(counts)
+            and (len(df) - target_n) >= len(counts)
+        ):
             sampled_idx, _ = train_test_split(
                 df.index.to_numpy(),
                 train_size=target_n,

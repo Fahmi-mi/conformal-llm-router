@@ -80,13 +80,15 @@ def predict_risk_proba(estimator: Any, X: np.ndarray) -> np.ndarray:
     """Predict positive-class hallucination probabilities from a 2D feature array."""
     arr = _validate_feature_array(X)
     probs = np.asarray(estimator.predict_proba(arr), dtype=float)
-    if probs.ndim != 2 or probs.shape[1] < 2:
+    if probs.ndim != 2 or probs.shape[1] != 2:
         raise ValueError(f"Expected 2-column probability output, got shape {probs.shape}.")
 
     classes = getattr(estimator, "classes_", None)
     if classes is not None:
         matches = np.where(np.asarray(classes) == 1)[0]
-        pos_idx = int(matches[0]) if len(matches) else 1
+        if len(matches) == 0:
+            raise ValueError(f"Estimator classes_ {list(classes)} does not contain positive label 1.")
+        pos_idx = int(matches[0])
     else:
         pos_idx = 1
 

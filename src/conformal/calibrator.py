@@ -72,6 +72,18 @@ def compute_ece(y_true: np.ndarray, probs: np.ndarray, n_bins: int = 10) -> floa
     return float(ece)
 
 
+def _pass_mask(risk_scores: np.ndarray, threshold: float) -> np.ndarray:
+    """Return boolean PASS mask under strict MAPIE LAC cutoff; threshold <= 0 always abstains."""
+    if threshold <= 0.0:
+        return np.zeros(risk_scores.shape, dtype=bool)
+    return risk_scores < threshold
+
+
+def _decide(risk_score: float, threshold: float) -> Literal["PASS", "ABSTAIN"]:
+    """Decide PASS/ABSTAIN for a single risk score using strict < and threshold > 0."""
+    return "PASS" if threshold > 0.0 and risk_score < threshold else "ABSTAIN"
+
+
 def _compute_split_metrics(
     y_true: np.ndarray,
     risk_scores: np.ndarray,
@@ -79,7 +91,7 @@ def _compute_split_metrics(
     alpha: float | None,
 ) -> dict[str, Any]:
     """Compute false-accept rate, abstention rate, ECE, and Brier score for a risk cutoff."""
-    pass_mask = risk_scores <= threshold
+    pass_mask = _pass_mask(risk_scores, threshold)
     false_accept_rate = float(np.mean((y_true == 1) & pass_mask))
     abstention_rate = float(np.mean(~pass_mask))
     ece = compute_ece(y_true, risk_scores)
@@ -211,7 +223,7 @@ def predict_risk_and_decision(
 
     X = np.asarray(features_df[bundle.feature_cols], dtype=float)
     risk_score = float(predict_risk_proba(bundle.estimator, X)[0])
-    decision: Literal["PASS", "ABSTAIN"] = "PASS" if risk_score <= threshold else "ABSTAIN"
+    decision = _decide(risk_score, float(threshold))
     return risk_score, decision, float(threshold)
 
 
@@ -221,12 +233,16 @@ def run_conformal_pipeline(
     artifacts_dir: Path,
 ) -> tuple[Path, Path, Path]:
     """Train base risk models, calibrate MAPIE thresholds, and export sweep/metrics artifacts."""
-    cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+    cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
     random_state = int(cfg.get("random_state", 42))
     default_alpha = float(cfg.get("default_alpha", 0.10))
     alpha_min = float(cfg.get("alpha_min", 0.01))
     alpha_max = float(cfg.get("alpha_max", 0.30))
     alpha_step = float(cfg.get("alpha_step", 0.01))
+    raw_benchmarks = cfg.get("benchmark_alphas")
+    benchmark_alphas = (
+        [float(a) for a in raw_benchmarks] if raw_benchmarks else [0.05, default_alpha]
+    )
 
     alphas = [
         round(float(a), 4)
@@ -302,23 +318,20 @@ def run_conformal_pipeline(
             **heuristic_metrics,
         },
         "logistic_mapie": {
-            "0.10": {
+            _format_alpha_key(alpha): {
                 "guardrail_method": "Logistic + Split Conformal (MAPIE)",
-                "target_alpha": 0.10,
-                **evaluate_conformal_split(bundles["logistic"], X_test, y_test, alpha=0.10),
-            },
+                "target_alpha": alpha,
+                **evaluate_conformal_split(bundles["logistic"], X_test, y_test, alpha=alpha),
+            }
+            for alpha in benchmark_alphas
         },
         "lightgbm_mapie": {
-            "0.10": {
+            _format_alpha_key(alpha): {
                 "guardrail_method": "LightGBM + Split Conformal (MAPIE)",
-                "target_alpha": 0.10,
-                **evaluate_conformal_split(bundles["lightgbm"], X_test, y_test, alpha=0.10),
-            },
-            "0.05": {
-                "guardrail_method": "LightGBM + Split Conformal (MAPIE)",
-                "target_alpha": 0.05,
-                **evaluate_conformal_split(bundles["lightgbm"], X_test, y_test, alpha=0.05),
-            },
+                "target_alpha": alpha,
+                **evaluate_conformal_split(bundles["lightgbm"], X_test, y_test, alpha=alpha),
+            }
+            for alpha in benchmark_alphas
         },
     }
     metrics_path.write_text(json.dumps(risk_metrics_payload, indent=2), encoding="utf-8")

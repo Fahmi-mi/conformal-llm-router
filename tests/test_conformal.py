@@ -16,6 +16,7 @@ from src.conformal.calibrator import (
 )
 from src.conformal.risk_model import (
     RISK_FEATURE_COLS,
+    _validate_binary_target,
     predict_risk_proba,
     train_risk_classifiers,
 )
@@ -77,6 +78,45 @@ def test_predict_risk_proba_rejects_non_finite_and_invalid_shape():
 
     with pytest.raises(ValueError, match="2D"):
         predict_risk_proba(models["lightgbm"], np.zeros(len(RISK_FEATURE_COLS)))
+
+
+def test_predict_risk_proba_rejects_non_binary_columns_and_missing_positive_class():
+    X = np.zeros((4, len(RISK_FEATURE_COLS)), dtype=float)
+
+    class _BadColsEstimator:
+        def __init__(self, ncols: int) -> None:
+            self.ncols = ncols
+            self.classes_ = np.arange(ncols)
+
+        def predict_proba(self, arr: np.ndarray) -> np.ndarray:
+            return np.full((len(arr), self.ncols), 1.0 / self.ncols)
+
+    for ncols in (1, 3):
+        with pytest.raises(ValueError, match="2-column"):
+            predict_risk_proba(_BadColsEstimator(ncols), X)
+
+    class _MissingPosClassEstimator:
+        classes_ = np.array([0, 2])
+
+        def predict_proba(self, arr: np.ndarray) -> np.ndarray:
+            return np.column_stack([np.ones(len(arr)), np.zeros(len(arr))])
+
+    with pytest.raises(ValueError, match="label 1"):
+        predict_risk_proba(_MissingPosClassEstimator(), X)
+
+
+def test_validate_binary_target_cases():
+    valid = _validate_binary_target(pd.Series([False, True, 0, 1]))
+    assert valid.tolist() == [0, 1, 0, 1]
+
+    with pytest.raises(ValueError, match="non-finite"):
+        _validate_binary_target(pd.Series([0.0, 1.0, np.nan]))
+
+    with pytest.raises(ValueError, match="binary"):
+        _validate_binary_target(pd.Series([0, 1, 2]))
+
+    with pytest.raises(ValueError, match="both classes"):
+        _validate_binary_target(pd.Series([0, 0, 0]))
 
 
 class _DummyBinaryEstimator:
@@ -162,15 +202,22 @@ def test_predict_risk_and_decision_validation_and_boundary():
         with pytest.raises(ValueError, match="alpha"):
             predict_risk_and_decision(bundle, row, alpha=bad_alpha)
 
-    # Exact PASS at boundary risk == threshold
+    # Strict < boundary: risk == threshold must ABSTAIN, while just below must PASS
     row_at = row.copy()
     row_at["cosine_sim"] = 0.40
     risk, decision, thresh = predict_risk_and_decision(bundle, row_at, alpha=None)
     assert risk == pytest.approx(0.40)
     assert thresh == pytest.approx(0.40)
-    assert decision == "PASS"
+    assert decision == "ABSTAIN"
 
-    # ABSTAIN just above threshold
+    row_below = row.copy()
+    row_below["cosine_sim"] = 0.3999
+    risk_b, decision_b, thresh_b = predict_risk_and_decision(bundle, row_below, alpha=0.10)
+    assert risk_b == pytest.approx(0.3999)
+    assert thresh_b == pytest.approx(0.40)
+    assert decision_b == "PASS"
+
+    # ABSTAIN above threshold
     row_above = row.copy()
     row_above["cosine_sim"] = 0.4001
     risk_a, decision_a, thresh_a = predict_risk_and_decision(bundle, row_above, alpha=0.10)
@@ -185,6 +232,29 @@ def test_predict_risk_and_decision_validation_and_boundary():
     assert thresh_i == pytest.approx(0.30)
     assert risk_i == pytest.approx(0.31)
     assert decision_i == "ABSTAIN"
+
+
+def test_predict_risk_and_decision_zero_threshold_always_abstains():
+    bundle = ConformalBundle(
+        estimator=_DummyBinaryEstimator(),
+        feature_cols=list(RISK_FEATURE_COLS),
+        alpha_thresholds={"0.05": 0.0, "0.10": 0.0},
+        default_alpha=0.10,
+        alpha_min=0.01,
+        alpha_max=0.30,
+        model_name="dummy",
+    )
+    row_zero = pd.DataFrame([{col: 0.0 for col in RISK_FEATURE_COLS}])
+    risk, decision, thresh = predict_risk_and_decision(bundle, row_zero, alpha=0.10)
+    assert risk == pytest.approx(0.0)
+    assert thresh == pytest.approx(0.0)
+    assert decision == "ABSTAIN"
+
+    X_zero = np.zeros((5, len(RISK_FEATURE_COLS)), dtype=float)
+    y_zero = np.array([0, 1, 0, 1, 0], dtype=int)
+    metrics = evaluate_conformal_split(bundle, X_zero, y_zero, alpha=0.10)
+    assert metrics["abstention_rate"] == pytest.approx(1.0)
+    assert metrics["false_accept_rate"] == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize(
@@ -250,6 +320,7 @@ def test_run_conformal_pipeline_exports_artifacts(tmp_path: Path):
             "benchmark_alphas:\n"
             "  - 0.05\n"
             "  - 0.10\n"
+            "  - 0.20\n"
         ),
         encoding="utf-8",
     )
@@ -285,6 +356,19 @@ def test_run_conformal_pipeline_exports_artifacts(tmp_path: Path):
     metrics_data = json.loads(metrics_path.read_text(encoding="utf-8"))
     assert metrics_data["status"] == "ready"
     assert "uncalibrated_heuristic" in metrics_data
-    assert "0.10" in metrics_data["logistic_mapie"]
+    assert set(metrics_data["logistic_mapie"].keys()) == {"0.05", "0.10", "0.20"}
+    assert set(metrics_data["lightgbm_mapie"].keys()) == {"0.05", "0.10", "0.20"}
+
+
+def test_run_conformal_pipeline_handles_empty_yaml(tmp_path: Path):
+    df = _make_split_df(n_train=120, n_cal=120, n_test=80, seed=17)
+    parquet_path = tmp_path / "features.parquet"
+    df.to_parquet(parquet_path, index=False)
+
+    empty_config = tmp_path / "empty.yaml"
+    empty_config.write_text("", encoding="utf-8")
+
+    _, _, metrics_path = run_conformal_pipeline(parquet_path, empty_config, tmp_path / "artifacts")
+    metrics_data = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert metrics_data["status"] == "ready"
     assert "0.10" in metrics_data["lightgbm_mapie"]
-    assert "0.05" in metrics_data["lightgbm_mapie"]
