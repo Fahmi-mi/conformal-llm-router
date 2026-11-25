@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,6 +93,27 @@ def _extract_entities(text: str) -> set[str]:
     return {tok.lower() for tok in _ENTITY_TOKEN_RE.findall(text)}
 
 
+def _call_with_supported_kwargs(fn: Any, arg: Any, kwargs: dict[str, Any]) -> Any:
+    filtered = dict(kwargs)
+    try:
+        params = inspect.signature(fn).parameters
+        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            filtered = {k: v for k, v in filtered.items() if k in params}
+    except (TypeError, ValueError):
+        pass
+
+    while True:
+        try:
+            return fn(arg, **filtered)
+        except TypeError as exc:
+            msg = str(exc)
+            dropped = [k for k in filtered if f"'{k}'" in msg or f'"{k}"' in msg]
+            if not dropped:
+                return fn(arg)
+            for k in dropped:
+                filtered.pop(k, None)
+
+
 def _compute_query_meta(queries: list[str]) -> pd.DataFrame:
     if not queries:
         return pd.DataFrame(
@@ -166,20 +188,25 @@ class FeatureExtractor:
 
     def _encode_texts(self, texts: list[str]) -> np.ndarray:
         if not texts:
-            return np.empty((0, 384), dtype=np.float32)
+            dim = 384
+            if self._embedder is not None and hasattr(self._embedder, "get_sentence_embedding_dimension"):
+                maybe_dim = self._embedder.get_sentence_embedding_dimension()
+                if maybe_dim is not None:
+                    dim = int(maybe_dim)
+            return np.empty((0, dim), dtype=np.float32)
 
         embedder = self._get_embedder()
         unique_texts = list(dict.fromkeys(texts))
-        try:
-            encoded = embedder.encode(
-                unique_texts,
-                batch_size=self.config.embed_batch_size,
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            )
-        except TypeError:
-            encoded = embedder.encode(unique_texts)
+        encoded = _call_with_supported_kwargs(
+            embedder.encode,
+            unique_texts,
+            {
+                "batch_size": self.config.embed_batch_size,
+                "normalize_embeddings": True,
+                "convert_to_numpy": True,
+                "show_progress_bar": False,
+            },
+        )
 
         unique_embs = _l2_normalize(np.asarray(encoded, dtype=np.float32))
         idx_map = {txt: i for i, txt in enumerate(unique_texts)}
@@ -193,16 +220,16 @@ class FeatureExtractor:
 
         model = self._get_nli_model()
         label_idx = _resolve_nli_label_indices(model)
-        try:
-            raw = model.predict(
-                pairs,
-                batch_size=self.config.nli_batch_size,
-                apply_softmax=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            )
-        except TypeError:
-            raw = model.predict(pairs)
+        raw = _call_with_supported_kwargs(
+            model.predict,
+            pairs,
+            {
+                "batch_size": self.config.nli_batch_size,
+                "apply_softmax": True,
+                "convert_to_numpy": True,
+                "show_progress_bar": False,
+            },
+        )
 
         scores = np.asarray(raw, dtype=np.float64)
         if scores.ndim == 1:
@@ -314,11 +341,14 @@ def build_feature_tables(
 
     rag_df = pd.read_parquet(ragtruth_path).reset_index(drop=True)
     rag_q_col = _get_query_column(rag_df, "RAGTruth")
+    missing_rag = [col for col in ("context", "response") if col not in rag_df.columns]
+    if missing_rag:
+        raise ValueError(f"RAGTruth missing required columns: {missing_rag}")
     rag_queries = rag_df[rag_q_col].fillna("").astype(str).tolist()
     rag_contexts = rag_df["context"].fillna("").astype(str).tolist()
     rag_responses = rag_df["response"].fillna("").astype(str).tolist()
 
-    _, rag_q_meta = ext.extract_query_features(rag_queries)
+    rag_q_meta = _compute_query_meta(rag_queries)
     rag_feats = ext.extract_rag_features(rag_queries, rag_contexts, rag_responses)
     rag_out_df = pd.concat([rag_df, rag_q_meta, rag_feats], axis=1)
     rag_out_path = out_root / "ragtruth_features.parquet"
@@ -351,8 +381,10 @@ def main() -> None:
     cfg = FeatureExtractorConfig()
     if args.config.exists():
         raw_cfg = yaml.safe_load(args.config.read_text()) or {}
-        cfg.embed_model = str(raw_cfg.get("embed_model", cfg.embed_model))
-        cfg.nli_model = str(raw_cfg.get("nli_model", cfg.nli_model))
+        if raw_cfg.get("embed_model") is not None:
+            cfg.embed_model = str(raw_cfg["embed_model"])
+        if raw_cfg.get("nli_model") is not None:
+            cfg.nli_model = str(raw_cfg["nli_model"])
 
     rag_out, rtr_out = build_feature_tables(
         ragtruth_path=args.ragtruth_in,
@@ -360,10 +392,10 @@ def main() -> None:
         out_dir=args.out_dir,
         extractor=FeatureExtractor(config=cfg),
     )
-    rag_df = pd.read_parquet(rag_out)
-    rtr_df = pd.read_parquet(rtr_out)
-    print(f"Saved RAGTruth features -> {rag_out} ({len(rag_df)} rows, {len(rag_df.columns)} cols)")
-    print(f"Saved RouterBench features -> {rtr_out} ({len(rtr_df)} rows, {len(rtr_df.columns)} cols)")
+    rag_meta = pq.read_metadata(rag_out)
+    rtr_meta = pq.read_metadata(rtr_out)
+    print(f"Saved RAGTruth features -> {rag_out} ({rag_meta.num_rows} rows, {rag_meta.num_columns} cols)")
+    print(f"Saved RouterBench features -> {rtr_out} ({rtr_meta.num_rows} rows, {rtr_meta.num_columns} cols)")
 
 
 if __name__ == "__main__":

@@ -32,21 +32,33 @@ def _require_columns(df: pd.DataFrame, required: list[str], dataset_name: str) -
 
 def _parse_hallucination_flag(val: Any) -> bool:
     if isinstance(val, dict):
-        return bool(val.get("evident_conflict", 0) > 0 or val.get("baseless_info", 0) > 0)
+        if "evident_conflict" in val or "baseless_info" in val:
+            return any(
+                (
+                    float(raw) > 0
+                    if isinstance(raw, (int, float, bool, np.integer, np.floating, np.bool_))
+                    else _parse_hallucination_flag(raw)
+                )
+                for raw in (val.get("evident_conflict") or 0, val.get("baseless_info") or 0)
+            )
+        return any(_parse_hallucination_flag(v) for v in val.values())
     if isinstance(val, str):
         stripped = val.strip()
-        if not stripped or stripped == "[]":
+        if not stripped:
             return False
         try:
             parsed = json.loads(stripped)
-            if isinstance(parsed, (list, dict)):
-                return len(parsed) > 0
         except json.JSONDecodeError:
+            return stripped.lower() not in {"false", "none", "null", "nan", "0"}
+        if isinstance(parsed, str) and parsed == stripped:
             return True
+        return _parse_hallucination_flag(parsed)
     if isinstance(val, (list, tuple, set, np.ndarray)):
         return len(val) > 0
     if pd.isna(val):
         return False
+    if isinstance(val, (int, float, np.integer, np.floating)) and not isinstance(val, (bool, np.bool_)):
+        return float(val) > 0
     return bool(val)
 
 
@@ -152,10 +164,27 @@ def normalize_routerbench_df(
     t1_c = pd.to_numeric(df[TIER1_COST_COL], errors="raise").astype(float)
     t2_c = pd.to_numeric(df[TIER2_COST_COL], errors="raise").astype(float)
 
+    bad_cols = {
+        col: int((~np.isfinite(series)).sum())
+        for col, series in (
+            (TIER1_MODEL, t1_q),
+            (TIER2_MODEL, t2_q),
+            (TIER1_COST_COL, t1_c),
+            (TIER2_COST_COL, t2_c),
+        )
+        if (~np.isfinite(series)).any()
+    }
+    if bad_cols:
+        raise ValueError(
+            f"RouterBench contains NaN or non-finite values in numeric columns: {bad_cols}"
+        )
+
     ood_set = set(ood_tasks)
     eval_names = df["eval_name"].astype(str)
     splits = pd.Series("train", index=df.index, dtype="object")
     ood_mask = eval_names.isin(ood_set)
+    if ood_tasks and not ood_mask.any():
+        raise ValueError(f"ood_tasks {ood_tasks!r} matched 0 rows in RouterBench eval_name")
     splits.loc[ood_mask] = "ood_test"
 
     in_dist_idx = np.flatnonzero((~ood_mask).to_numpy())

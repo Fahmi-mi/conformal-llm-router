@@ -1,9 +1,11 @@
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from src.eval import features
 from src.eval.features import (
     FeatureExtractor,
     FeatureExtractorConfig,
@@ -217,3 +219,185 @@ def test_build_feature_tables_roundtrip(tmp_path: Path):
         rtr_df.columns
     )
     assert len(rtr_df["query_embedding"].iloc[0]) == 384
+
+
+def test_single_vs_batch_parity():
+    ext = FeatureExtractor(embedder=FakeEmbedder(), nli_model=FakeNLIModel())
+    queries = [
+        "Explain conformal prediction in 2 sentences.",
+        "What is the GDP of France in 2024?",
+        "Write a Python binary search.",
+    ]
+    contexts = [
+        "Conformal prediction provides distribution-free coverage guarantees.",
+        "France had a nominal GDP of roughly 3 trillion USD in 2024.",
+        "Binary search runs in O(log n) time on sorted arrays.",
+    ]
+    responses = [
+        "Conformal prediction guarantees finite-sample coverage.",
+        "France GDP in 2024 was about 3 trillion USD.",
+        "Here is binary search in Python.",
+    ]
+
+    embs_batch, meta_batch = ext.extract_query_features(queries)
+    rag_batch = ext.extract_rag_features(queries, contexts, responses)
+
+    for i, (q, ctx, resp) in enumerate(zip(queries, contexts, responses)):
+        emb_single, meta_single = ext.extract_query_features([q])
+        assert np.allclose(embs_batch[i], emb_single[0], atol=1e-6)
+        assert meta_batch.iloc[[i]].reset_index(drop=True).equals(meta_single.reset_index(drop=True))
+
+        rag_single = ext.extract_rag_features([q], [ctx], [resp])
+        for col in rag_batch.columns:
+            if pd.api.types.is_integer_dtype(rag_batch[col]):
+                assert int(rag_batch[col].iloc[i]) == int(rag_single[col].iloc[0])
+            else:
+                assert np.isclose(rag_batch[col].iloc[i], rag_single[col].iloc[0], atol=1e-6)
+
+
+def test_lazy_load_cross_encoder_max_length_and_partial_predict_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured_init: dict[str, object] = {}
+    captured_predict_kwargs: list[dict[str, object]] = []
+
+    class _PartialSigCrossEncoder:
+        def __init__(self, model_name: str, max_length: int | None = None) -> None:
+            captured_init["model_name"] = model_name
+            captured_init["max_length"] = max_length
+            self.model = _FakeInnerModel({0: "contradiction", 1: "entailment", 2: "neutral"})
+
+        def predict(self, pairs, batch_size: int = 32, convert_to_numpy: bool = True):
+            captured_predict_kwargs.append(
+                {"batch_size": batch_size, "convert_to_numpy": convert_to_numpy}
+            )
+            return np.tile(np.array([[0.2, 2.0, 0.5]], dtype=np.float32), (len(pairs), 1))
+
+    import sentence_transformers
+
+    monkeypatch.setattr(sentence_transformers, "CrossEncoder", _PartialSigCrossEncoder)
+
+    cfg = FeatureExtractorConfig(nli_batch_size=16, nli_max_length=512)
+    ext = FeatureExtractor(config=cfg, embedder=FakeEmbedder())
+    df = ext.extract_rag_features(["q"], ["Paris is in France."], ["Paris is in France."])
+
+    assert captured_init == {"model_name": cfg.nli_model, "max_length": 512}
+    assert captured_predict_kwargs == [{"batch_size": 16, "convert_to_numpy": True}]
+    assert np.isclose(
+        df["nli_entailment"].iloc[0] + df["nli_contradiction"].iloc[0] + df["nli_neutral"].iloc[0],
+        1.0,
+        atol=1e-5,
+    )
+
+
+def test_predict_nli_drops_only_rejected_kwarg_on_type_error():
+    seen_calls: list[dict[str, object]] = []
+
+    class _KwargsRejectingNLI:
+        model = _FakeInnerModel({0: "contradiction", 1: "entailment", 2: "neutral"})
+
+        def predict(self, pairs, **kwargs):
+            seen_calls.append(dict(kwargs))
+            if "apply_softmax" in kwargs:
+                raise TypeError("predict() got an unexpected keyword argument 'apply_softmax'")
+            return np.tile(np.array([[0.1, 2.0, 0.2]], dtype=np.float32), (len(pairs), 1))
+
+    ext = FeatureExtractor(
+        config=FeatureExtractorConfig(nli_batch_size=12),
+        embedder=FakeEmbedder(),
+        nli_model=_KwargsRejectingNLI(),
+    )
+    ext.extract_rag_features(["q"], ["ctx"], ["resp"])
+    assert len(seen_calls) == 2
+    assert seen_calls[1]["batch_size"] == 12
+    assert seen_calls[1]["convert_to_numpy"] is True
+    assert "apply_softmax" not in seen_calls[1]
+
+
+def test_encode_texts_empty_uses_embedder_dimension():
+    class _DimEmbedder(FakeEmbedder):
+        def get_sentence_embedding_dimension(self) -> int:
+            return 128
+
+    ext = FeatureExtractor(embedder=_DimEmbedder(dim=128), nli_model=FakeNLIModel())
+    embs, meta = ext.extract_query_features([])
+    assert embs.shape == (0, 128)
+    assert len(meta) == 0
+
+
+def test_build_feature_tables_missing_rag_columns_and_no_rag_query_encoding(tmp_path: Path):
+    rag_in = tmp_path / "ragtruth_missing.parquet"
+    rtr_in = tmp_path / "routerbench.parquet"
+    out_dir = tmp_path / "processed"
+
+    pd.DataFrame({"id": ["1"], "prompt": ["q1"], "context": ["c1"]}).to_parquet(rag_in, index=False)
+    pd.DataFrame({"sample_id": ["s1"], "prompt": ["q2"]}).to_parquet(rtr_in, index=False)
+
+    ext = FeatureExtractor(embedder=FakeEmbedder(), nli_model=FakeNLIModel())
+    with pytest.raises(ValueError, match="response"):
+        build_feature_tables(rag_in, rtr_in, out_dir, extractor=ext)
+
+    # Verify RAGTruth queries are NOT embedded (only context, response, and routerbench queries)
+    rag_ok = tmp_path / "ragtruth_ok.parquet"
+    pd.DataFrame(
+        {
+            "id": ["1"],
+            "prompt": ["UNIQUE_RAG_QUERY_NOT_EMBEDDED"],
+            "context": ["ctx"],
+            "response": ["resp"],
+        }
+    ).to_parquet(rag_ok, index=False)
+    emb = FakeEmbedder()
+    ext2 = FeatureExtractor(embedder=emb, nli_model=FakeNLIModel())
+    build_feature_tables(rag_ok, rtr_in, out_dir, extractor=ext2)
+    assert "UNIQUE_RAG_QUERY_NOT_EMBEDDED" not in emb.seen_texts
+
+
+def test_features_cli_main_null_yaml_and_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text("embed_model: null\nnli_model: null\n")
+
+    rag_in = tmp_path / "rag.parquet"
+    rtr_in = tmp_path / "rtr.parquet"
+    out_dir = tmp_path / "out"
+    pd.DataFrame(
+        {
+            "id": ["1"],
+            "prompt": ["q1"],
+            "context": ["ctx"],
+            "response": ["resp"],
+        }
+    ).to_parquet(rag_in, index=False)
+    pd.DataFrame({"sample_id": ["s1"], "prompt": ["q2"]}).to_parquet(rtr_in, index=False)
+
+    created_configs: list[FeatureExtractorConfig] = []
+
+    class _DummyExtractor(FeatureExtractor):
+        def __init__(self, config=None, embedder=None, nli_model=None):
+            created_configs.append(config)
+            super().__init__(config=config, embedder=FakeEmbedder(), nli_model=FakeNLIModel())
+
+    monkeypatch.setattr(features, "FeatureExtractor", _DummyExtractor)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "features",
+            "--config",
+            str(cfg_path),
+            "--ragtruth-in",
+            str(rag_in),
+            "--routerbench-in",
+            str(rtr_in),
+            "--out-dir",
+            str(out_dir),
+        ],
+    )
+    features.main()
+    out = capsys.readouterr().out
+    assert created_configs[0].embed_model == FeatureExtractorConfig().embed_model
+    assert created_configs[0].nli_model == FeatureExtractorConfig().nli_model
+    assert "Saved RAGTruth features" in out
+    assert "Saved RouterBench features" in out
