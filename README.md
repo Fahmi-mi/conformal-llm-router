@@ -98,7 +98,7 @@ Offline training, statistical calibration, and large-scale benchmarking require 
 
 ---
 
-## Proposed Repository Structure
+## Repository Structure
 
 ```text
 conformal-llm-router/
@@ -126,13 +126,17 @@ conformal-llm-router/
 │       ├── main.py                  # FastAPI inference & guardrail gateway
 │       ├── cache.py                 # FAISS/SQLite semantic cache
 │       ├── providers.py             # Groq / Gemini / Ollama unified async clients
-│       └── schemas.py               # Pydantic request/response/telemetry models
-├── dashboard/                       # Streamlit or SvelteKit Pareto & calibration UI
+│       ├── schemas.py               # Pydantic request/response/telemetry models
+│       └── storage.py               # SQLite telemetry store & Pareto aggregation
+├── dashboard/                       # SvelteKit Pareto & calibration UI
 ├── tests/
 │   ├── test_conformal.py            # Empirical coverage & abstention boundary tests
 │   ├── test_router.py               # Routing constraint & fallback tests
 │   └── test_gateway.py              # FastAPI endpoint, cache hit, & 429 fallback tests
+├── .dockerignore
 ├── Dockerfile
+├── docker-compose.yml
+├── DESIGN.md
 ├── pyproject.toml
 └── README.md
 ```
@@ -150,6 +154,7 @@ docker compose up --build
 
 - FastAPI Gateway: `http://localhost:8000` (health check: `GET /health`, docs: `/docs`)
 - SvelteKit Monitoring Console: `http://localhost:3000`
+- Host Ollama inside Docker routes to `http://host.docker.internal:11434` by default (override via `DOCKER_OLLAMA_BASE_URL` in `.env`).
 
 ### Option B: Local Development (`uv` + `npm`)
 

@@ -5,17 +5,20 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./artifacts:/app/artifacts
       - ./data:/app/data
       - ./config:/app/config
+      - hf_cache:/root/.cache/huggingface
     env_file:
       - path: .env
         required: false
     environment:
       GATEWAY_ALPHA_DEFAULT: ${GATEWAY_ALPHA_DEFAULT:-0.10}
       GATEWAY_LAMBDA_DEFAULT: ${GATEWAY_LAMBDA_DEFAULT:-0.45}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://localhost:11434}
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
 
   dashboard:
     build:
@@ -27,4 +30,8 @@ services:
       ORIGIN: http://localhost:3000
       PUBLIC_GATEWAY_URL: ${PUBLIC_GATEWAY_URL:-http://localhost:8000}
     depends_on:
-      - gateway
+      gateway:
+        condition: service_healthy
+
+volumes:
+  hf_cache:
