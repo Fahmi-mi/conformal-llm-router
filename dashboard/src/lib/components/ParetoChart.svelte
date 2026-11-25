@@ -71,6 +71,11 @@
 
 	const activePoint = $derived(findNearestParetoPoint(curve, activeLambda));
 	const displayPoint = $derived(hoveredPoint ?? activePoint);
+	const calloutY = $derived(
+		displayPoint
+			? Math.min(H - pad.bottom - 8, Math.max(pad.top + 14, yPx(displayPoint.avg_quality) - 6))
+			: null
+	);
 
 	const yTicks = $derived.by(() => {
 		const count = compact ? 3 : 5;
@@ -101,7 +106,7 @@
 					x={pad.left - 8}
 					y={y + 3.5}
 					text-anchor="end"
-					font-size="10.5"
+					font-size="11"
 					fill="#5C6860"
 					class="font-mono-data"
 				>
@@ -117,7 +122,7 @@
 					x={x}
 					y={H - pad.bottom + 16}
 					text-anchor="middle"
-					font-size="10.5"
+					font-size="11"
 					fill="#5C6860"
 					class="font-mono-data"
 				>
@@ -158,7 +163,7 @@
 				{@const by = yPx(baselines.random_router.avg_quality)}
 				<rect x={bx - 4} y={by - 4} width="8" height="8" fill="#FCFBF8" stroke="#5C6860" stroke-width="1.75" />
 				{#if !compact}
-					<text x={bx + 8} y={by + 4} font-size="10.5" fill="#5C6860">Random</text>
+					<text x={bx + 8} y={by + 4} font-size="11" fill="#5C6860">Random</text>
 				{/if}
 			{/if}
 
@@ -168,7 +173,7 @@
 				<line x1={pad.left} y1={fy} x2={W - pad.right} y2={fy} stroke="#9EA79F" stroke-dasharray="4 4" stroke-width="1" />
 				<circle cx={fx} cy={fy} r="4" fill="#1C2721" />
 				{#if !compact}
-					<text x={fx - 8} y={fy - 8} text-anchor="end" font-size="10.5" fill="#1C2721">Frontier 100%</text>
+					<text x={fx - 8} y={fy - 8} text-anchor="end" font-size="11" fill="#1C2721">Frontier 100%</text>
 				{/if}
 			{/if}
 
@@ -219,12 +224,11 @@
 			{/each}
 
 			<!-- Active point callout -->
-			{#if displayPoint}
+			{#if displayPoint && calloutY !== null}
 				{@const ax = xPx(displayPoint.normalized_cost)}
-				{@const ay = yPx(displayPoint.avg_quality)}
 				{@const alignRight = ax > pad.left + plotW * 0.58}
 				<line x1={ax} y1={pad.top} x2={ax} y2={H - pad.bottom} stroke="#B84A39" stroke-dasharray="3 3" stroke-width="1" opacity="0.6" />
-				<g transform="translate({alignRight ? ax - 10 : ax + 10}, {Math.max(pad.top + 14, ay - 6)})">
+				<g transform="translate({alignRight ? ax - 10 : ax + 10}, {calloutY})">
 					<text
 						text-anchor={alignRight ? 'end' : 'start'}
 						font-size="11"
@@ -240,6 +244,7 @@
 			<!-- Live gateway point indicator (when frontier baseline cost available) -->
 			{#if livePoint && livePoint.estimated_frontier_cost_usd > 0}
 				{@const liveNormCost = Math.min(1, Math.max(0, livePoint.avg_cost_usd / livePoint.estimated_frontier_cost_usd))}
+				{@const liveLabelY = calloutY !== null && calloutY < pad.top + plotH * 0.5 ? H - pad.bottom - 8 : pad.top + 12}
 				<line
 					x1={xPx(liveNormCost)}
 					y1={pad.top}
@@ -251,9 +256,9 @@
 				/>
 				<text
 					x={xPx(liveNormCost)}
-					y={pad.top + 11}
-					text-anchor={liveNormCost > 0.7 ? 'end' : 'start'}
-					dx={liveNormCost > 0.7 ? -4 : 4}
+					y={liveLabelY}
+					text-anchor={liveNormCost > 0.65 ? 'end' : 'start'}
+					dx={liveNormCost > 0.65 ? -4 : 4}
 					font-size="11"
 					font-weight="600"
 					fill="#1C2721"

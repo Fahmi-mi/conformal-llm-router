@@ -118,10 +118,18 @@
 				<tbody>
 					{#each conformalRows as row}
 						{@const e = row.entry}
+						{@const targetAlpha = e ? (e.target_alpha ?? e.alpha ?? null) : null}
+						{@const farColorClass = !e
+							? 'text-[#8F520E]'
+							: targetAlpha === null
+								? 'text-[#1C2721]'
+								: e.false_accept_rate <= targetAlpha
+									? 'text-[#236B52]'
+									: 'text-[#B84A39]'}
 						<tr class="border-b border-[#ECE7DC]">
 							<td class="py-2.5 px-2 font-medium text-[#1C2721]">{row.label}</td>
 							<td class="py-2.5 px-2 text-right font-mono-data">{row.alphaLabel}</td>
-							<td class="py-2.5 px-2 text-right font-mono-data font-semibold {e ? 'text-[#236B52]' : 'text-[#8F520E]'}">
+							<td class="py-2.5 px-2 text-right font-mono-data font-semibold {farColorClass}">
 								{e ? formatPct(e.false_accept_rate, 2) : 'TBD'}
 							</td>
 							<td class="py-2.5 px-2 text-right font-mono-data">

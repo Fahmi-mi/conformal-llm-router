@@ -16,7 +16,12 @@ from src.conformal.risk_model import RISK_FEATURE_COLS
 from src.eval.features import QUERY_META_COLUMNS, FeatureExtractor
 from src.gateway.cache import SemanticCache
 from src.gateway.main import create_app
-from src.gateway.providers import GatewaySettings, ProviderRouter, UpstreamUnavailableError
+from src.gateway.providers import (
+    GatewaySettings,
+    ProviderRouter,
+    UpstreamUnavailableError,
+    _compute_cost_usd,
+)
 from src.gateway.schemas import (
     AuditListResponse,
     BenchmarksSummaryResponse,
@@ -235,6 +240,22 @@ def test_query_without_context_returns_unscored_and_context_bypasses_unscored_ca
     assert body3.evidence is not None
     assert len(calls) == 2
 
+    # 4. Repeating contextualized query hits PASS cache instead of being shadowed by faiss_id=0 UNSCORED
+    resp4 = client.post(
+        "/v1/query",
+        json={
+            "query": "What is the capital of France?",
+            "context": "France's capital city is Paris.",
+        },
+    )
+    assert resp4.status_code == 200
+    body4 = QueryResponse.model_validate(resp4.json())
+    assert body4.cache_hit is True
+    assert body4.conformal_decision == "PASS"
+    assert body4.estimated_cost_usd == 0.0
+    assert body4.calibrated_risk_score == pytest.approx(body3.calibrated_risk_score)
+    assert len(calls) == 2
+
     items, total = store.query_audit(decision="UNSCORED")
     assert total == 2
     assert len(items) == 2
@@ -275,6 +296,9 @@ def test_tier1_abstention_escalates_once_to_tier2_and_handles_double_abstention(
     client, store, cache, _ = _build_test_client(tmp_path, handler)
 
     # Case A: Tier 1 exceeds alpha -> 1x escalate to Tier 2 -> Tier 2 passes
+    expected_escalated_cost = _compute_cost_usd("groq", 100, 40) + _compute_cost_usd(
+        "deepseek", 100, 40
+    )
     resp_a = client.post(
         "/v1/query",
         json={
@@ -289,7 +313,23 @@ def test_tier1_abstention_escalates_once_to_tier2_and_handles_double_abstention(
     assert body_a.provider == "deepseek"
     assert body_a.conformal_decision == "PASS"
     assert body_a.answer == "Paris is the capital of France."
-    assert body_a.estimated_cost_usd > 0.0
+    assert body_a.estimated_cost_usd == pytest.approx(expected_escalated_cost)
+    assert len(calls) == 2
+
+    # Repeating the escalated query at default lambda (predicting tier1) still hits the cached tier2 answer
+    resp_a_cached = client.post(
+        "/v1/query",
+        json={
+            "query": "What is the capital of France?",
+            "context": "France's capital city is Paris.",
+        },
+    )
+    assert resp_a_cached.status_code == 200
+    body_a_cached = QueryResponse.model_validate(resp_a_cached.json())
+    assert body_a_cached.cache_hit is True
+    assert body_a_cached.tier == "tier2"
+    assert body_a_cached.answer == "Paris is the capital of France."
+    assert body_a_cached.estimated_cost_usd == 0.0
     assert len(calls) == 2
 
     # Case B: Tier 1 exceeds alpha -> 1x escalate to Tier 2 -> Tier 2 ALSO exceeds alpha -> ABSTAIN
@@ -309,6 +349,7 @@ def test_tier1_abstention_escalates_once_to_tier2_and_handles_double_abstention(
     assert body_b.conformal_decision == "ABSTAIN"
     assert body_b.answer == ABSTAIN_MESSAGE
     assert body_b.draft_answer == "This is an unsupported Tier 2 claim."
+    assert body_b.estimated_cost_usd == pytest.approx(expected_escalated_cost)
     assert len(calls) == 2
 
     # Persisted with draft_answer in SQLite, and NOT cached in FAISS
@@ -688,3 +729,121 @@ def test_importing_gateway_main_performs_zero_disk_io(
     assert not (tmp_path / "data").exists()
     assert not (tmp_path / "data" / "telemetry.db").exists()
     assert not (tmp_path / "data" / "faiss.index").exists()
+
+
+def test_missing_artifacts_503_and_evaluate_risk_whitespace_422(tmp_path: Path) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    client, _, _, _ = _build_test_client(tmp_path, handler, with_artifacts=False)
+    q_resp = client.post("/v1/query", json={"query": "What is conformal prediction?"})
+    assert q_resp.status_code == 503
+    assert "calibrator.pkl" in q_resp.json()["detail"]
+
+    er_resp = client.post(
+        "/v1/evaluate-risk",
+        json={
+            "query": "What is conformal prediction?",
+            "context": "Conformal prediction provides coverage.",
+            "candidate_answer": "Coverage guarantees.",
+        },
+    )
+    assert er_resp.status_code == 503
+    assert "calibrator.pkl" in er_resp.json()["detail"]
+
+    valid_client, _, _, _ = _build_test_client(tmp_path / "valid", handler, with_artifacts=True)
+    ws_ctx = valid_client.post(
+        "/v1/evaluate-risk",
+        json={
+            "query": "What is conformal prediction?",
+            "context": "   \t\n  ",
+            "candidate_answer": "Coverage guarantees.",
+        },
+    )
+    assert ws_ctx.status_code == 422
+
+    ws_ans = valid_client.post(
+        "/v1/evaluate-risk",
+        json={
+            "query": "What is conformal prediction?",
+            "context": "Conformal prediction provides coverage.",
+            "candidate_answer": "   \n  ",
+        },
+    )
+    assert ws_ans.status_code == 422
+
+
+def test_lambda_zero_tier2_cache_misses_when_lambda_returns_to_default(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        calls.append(url)
+        if "deepseek.com" in url:
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "Grounded Tier 2 answer."}}]}
+            )
+        if "groq.com" in url:
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "Grounded Tier 1 answer."}}]}
+            )
+        return httpx.Response(500)
+
+    client, _, _, _ = _build_test_client(tmp_path, handler)
+    payload = {
+        "query": "What is the weather today?",
+        "context": "Today the weather is sunny and 22C.",
+    }
+
+    # 1. Force Tier 2 via lambda_cost_override=0.0
+    r1 = QueryResponse.model_validate(
+        client.post("/v1/query", json={**payload, "lambda_cost_override": 0.0}).json()
+    )
+    assert r1.cache_hit is False
+    assert r1.tier == "tier2"
+    assert r1.provider == "deepseek"
+    assert len(calls) == 1
+
+    # 2. Default lambda_cost_override=None (predicts tier1) must MISS stale tier2 cache and route tier1
+    r2 = QueryResponse.model_validate(client.post("/v1/query", json=payload).json())
+    assert r2.cache_hit is False
+    assert r2.tier == "tier1"
+    assert r2.provider == "groq"
+    assert len(calls) == 2
+
+
+def test_tier1_abstention_without_deepseek_falls_back_gracefully_to_abstain(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "This is a hallucinated Tier 1 claim."}}]},
+        )
+
+    client, store, cache, _ = _build_test_client(tmp_path, handler, deepseek_key=None)
+    resp = client.post(
+        "/v1/query",
+        json={
+            "query": "What is the capital of France?",
+            "context": "France's capital city is Paris.",
+        },
+    )
+    assert resp.status_code == 200
+    body = QueryResponse.model_validate(resp.json())
+    assert body.conformal_decision == "ABSTAIN"
+    assert body.answer == ABSTAIN_MESSAGE
+    assert body.draft_answer == "This is a hallucinated Tier 1 claim."
+    assert body.escalated_from_tier1 is False
+    assert body.tier == "tier1"
+    assert body.provider == "groq"
+    assert len(calls) == 1
+
+    stored = store.get_request(body.request_id)
+    assert stored is not None
+    assert stored["draft_answer"] == "This is a hallucinated Tier 1 claim."
+    assert stored["escalated_from_tier1"] is False
+    assert cache._index.ntotal == 0

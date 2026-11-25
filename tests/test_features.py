@@ -401,3 +401,40 @@ def test_features_cli_main_null_yaml_and_metadata(
     assert created_configs[0].nli_model == FeatureExtractorConfig().nli_model
     assert "Saved RAGTruth features" in out
     assert "Saved RouterBench features" in out
+
+
+def test_feature_extractor_lazy_model_loading_is_thread_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import sentence_transformers
+
+    embed_calls = 0
+    nli_calls = 0
+
+    class _SlowEmbedder:
+        def __init__(self, _name: str) -> None:
+            nonlocal embed_calls
+            time.sleep(0.05)
+            embed_calls += 1
+
+    class _SlowCrossEncoder:
+        def __init__(self, _name: str, max_length: int = 512) -> None:
+            nonlocal nli_calls
+            time.sleep(0.05)
+            nli_calls += 1
+
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", _SlowEmbedder)
+    monkeypatch.setattr(sentence_transformers, "CrossEncoder", _SlowCrossEncoder)
+
+    ext = FeatureExtractor()
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        emb_results = list(pool.map(lambda _: ext._get_embedder(), range(6)))
+        nli_results = list(pool.map(lambda _: ext._get_nli_model(), range(6)))
+
+    assert embed_calls == 1
+    assert nli_calls == 1
+    assert len({id(obj) for obj in emb_results}) == 1
+    assert len({id(obj) for obj in nli_results}) == 1

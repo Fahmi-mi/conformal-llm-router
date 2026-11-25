@@ -234,8 +234,15 @@ class TelemetryStore:
             clauses.append("cache_hit = ?")
             params.append(int(cache_hit))
         if q is not None and q.strip():
-            clauses.append("LOWER(query_text) LIKE ?")
-            params.append(f"%{q.strip().lower()}%")
+            escaped_q = (
+                q.strip()
+                .lower()
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            clauses.append("LOWER(query_text) LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped_q}%")
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 

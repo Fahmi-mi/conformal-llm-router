@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -58,38 +60,53 @@ class SemanticCache:
             return None
         return np.ascontiguousarray(arr / norm, dtype=np.float32)
 
-    def lookup(self, embedding: np.ndarray) -> dict[str, Any] | None:
-        """Return cached SQLite record if top cosine similarity >= threshold, else None."""
+    def lookup(
+        self,
+        embedding: np.ndarray,
+        predicate: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> dict[str, Any] | None:
+        """Return first cached SQLite record >= threshold matching predicate, else None."""
         vec = self._normalize(embedding)
         if vec is None:
             return None
 
         with self._lock:
-            if self._index.ntotal == 0:
+            ntotal = int(self._index.ntotal)
+            if ntotal == 0:
                 return None
-            scores, indices = self._index.search(vec, 1)
+            k = min(16, ntotal)
+            scores, indices = self._index.search(vec, k)
 
-        top_score = float(scores[0][0])
-        top_id = int(indices[0][0])
-        if top_id < 0 or top_score < self.similarity_threshold:
-            return None
-
-        record = self.store.get_cached_request_by_faiss_id(top_id)
-        if record is None or record.get("conformal_decision") == "ABSTAIN":
-            return None
-        return record
+        for score_raw, idx_raw in zip(scores[0], indices[0]):
+            score = float(score_raw)
+            faiss_id = int(idx_raw)
+            if faiss_id < 0 or score < self.similarity_threshold:
+                continue
+            record = self.store.get_cached_request_by_faiss_id(faiss_id)
+            if record is None or record.get("conformal_decision") == "ABSTAIN":
+                continue
+            if predicate is None or predicate(record):
+                return record
+        return None
 
     def put(self, embedding: np.ndarray, record: dict[str, Any]) -> None:
-        """Persist non-ABSTAIN request embedding to FAISS and register in SQLite."""
+        """Persist non-ABSTAIN request embedding to FAISS atomically and register in SQLite."""
         vec = self._normalize(embedding)
         if record.get("conformal_decision") == "ABSTAIN" or vec is None:
             return
 
         request_id = record["request_id"]
+        tmp_path = self.index_path.with_suffix(".tmp")
         with self._lock:
             if self.store.get_request(request_id) is None:
                 self.store.insert_request(record)
             faiss_id = int(self._index.ntotal)
             self._index.add(vec)
-            faiss.write_index(self._index, str(self.index_path))
-            self.store.register_cache_entry(faiss_id, request_id)
+            try:
+                faiss.write_index(self._index, str(tmp_path))
+                self.store.register_cache_entry(faiss_id, request_id)
+                os.replace(tmp_path, self.index_path)
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                self._index.remove_ids(np.array([faiss_id], dtype=np.int64))
+                raise

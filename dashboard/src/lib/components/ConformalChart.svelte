@@ -105,7 +105,7 @@
 					x={pad.left - 8}
 					y={y + 3.5}
 					text-anchor="end"
-					font-size="10.5"
+					font-size="11"
 					fill="#5C6860"
 					class="font-mono-data"
 				>
@@ -120,7 +120,7 @@
 					x={x}
 					y={H - pad.bottom + 16}
 					text-anchor="middle"
-					font-size="10.5"
+					font-size="11"
 					fill="#5C6860"
 					class="font-mono-data"
 				>
@@ -135,7 +135,7 @@
 						x={W - pad.right + 8}
 						y={yAbstainPx(tick) + 3.5}
 						text-anchor="start"
-						font-size="10.5"
+						font-size="11"
 						fill="#236B52"
 						class="font-mono-data"
 					>
@@ -175,7 +175,7 @@
 				stroke-dasharray="5 5"
 				stroke-width="1.5"
 			/>
-			<text x={xPx(0.27)} y={yPx(0.285)} text-anchor="end" font-size="10.5" fill="#5C6860">
+			<text x={xPx(0.27)} y={yPx(0.285)} text-anchor="end" font-size="11" fill="#5C6860">
 				Bound: FAR = α
 			</text>
 
