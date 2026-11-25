@@ -13,6 +13,8 @@ import pytest
 from src.eval.judge_audit import (
     _create_httpx_judge_fn,
     _parse_judge_score,
+    _resolve_api_credentials,
+    _stratified_sample,
     build_judge_messages,
     compute_judge_metrics,
     fit_bias_correction,
@@ -89,6 +91,7 @@ def test_run_judge_audit_tbd_without_api_key(tmp_path: Path, monkeypatch: pytest
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("src.eval.judge_audit._REPO_ENV_FILE", tmp_path / "missing.env")
 
     parquet_path = _make_sample_features_parquet(tmp_path / "features.parquet")
     out_json = tmp_path / "artifacts" / "judge_audit_summary.json"
@@ -213,3 +216,50 @@ async def test_httpx_judge_client_position_ordering_and_score_parsing():
     assert _parse_judge_score('```json\n{"score": 0.75}\n```') == pytest.approx(0.75)
     assert _parse_judge_score('Step 1 done. {"score": 0.35}') == pytest.approx(0.35)
     assert len(build_judge_messages("Q?", "Ctx", "Resp")) == 2
+
+
+def test_stratified_sample_complement_size_guard(tmp_path: Path):
+    # 18 rows across 3 tasks x 2 labels = 6 strata (3 rows per stratum).
+    # With sample_size=13, complement has 18 - 13 = 5 < 6 strata, which would fail joint stratify.
+    parquet_path = _make_sample_features_parquet(tmp_path / "features.parquet", n_per_task=6)
+    df = pd.read_parquet(parquet_path)
+    assert len(df) == 18
+
+    sampled_13 = _stratified_sample(df, sample_size=13, random_state=42)
+    assert len(sampled_13) == 13
+
+    # With sample_size=16, complement has 18 - 16 = 2 < 3 task strata, falling back to random sample.
+    sampled_16 = _stratified_sample(df, sample_size=16, random_state=42)
+    assert len(sampled_16) == 16
+
+
+@pytest.mark.parametrize(
+    "bad_content",
+    [
+        '{"score": NaN}',
+        '{"score": Infinity}',
+        '{"score": -Infinity}',
+        '{"score": "nan"}',
+        "NaN",
+    ],
+)
+def test_parse_judge_score_rejects_non_finite(bad_content: str):
+    with pytest.raises(ValueError):
+        _parse_judge_score(bad_content)
+
+
+def test_resolve_api_credentials_falls_back_to_repo_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    cwd_dir = tmp_path / "cwd_subdir"
+    cwd_dir.mkdir()
+    monkeypatch.chdir(cwd_dir)
+
+    repo_env = tmp_path / "repo.env"
+    repo_env.write_text("GROQ_API_KEY=test-repo-groq-key\n", encoding="utf-8")
+    monkeypatch.setattr("src.eval.judge_audit._REPO_ENV_FILE", repo_env)
+
+    assert _resolve_api_credentials() == ("groq", "test-repo-groq-key")
