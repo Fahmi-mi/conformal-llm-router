@@ -1,6 +1,6 @@
 # Conformal Hallucination Control & Learned LLM Cost-Quality Router
 
-> **Status:** Project Specification / Blueprint (not yet implemented; evaluation result fields marked `TBD` until experiments are run).
+> **Status:** Implemented (Phases 1–4 complete: offline feature extraction, conformal risk calibration, Pareto router training, FastAPI gateway, SvelteKit monitoring console, and Docker Compose stack verified). Automated LLM-as-a-Judge audit remains `TBD` until `DEEPSEEK_API_KEY` or `GROQ_API_KEY` is configured.
 
 A **Statistical AI Control & LLMOps** platform that applies **Conformal Prediction**, **Bias-Corrected Evaluation**, and **Cost-Quality Routing** to make production LLM/RAG systems mathematically reliable and cost-efficient.
 
@@ -139,25 +139,72 @@ conformal-llm-router/
 
 ---
 
-## Target Experiment Results (To Populate After Runs)
+## Quickstart (Local & Docker Compose)
 
-### Conformal Hallucination Control (`RAGTruth` Test Split)
+### Option A: Docker Compose (Gateway + Dashboard)
+
+```sh
+cp .env.example .env   # optional: add DEEPSEEK_API_KEY / GROQ_API_KEY / GEMINI_API_KEY
+docker compose up --build
+```
+
+- FastAPI Gateway: `http://localhost:8000` (health check: `GET /health`, docs: `/docs`)
+- SvelteKit Monitoring Console: `http://localhost:3000`
+
+### Option B: Local Development (`uv` + `npm`)
+
+```sh
+# 1. Start the FastAPI inference & guardrail gateway
+uv sync --frozen
+uv run uvicorn src.gateway.main:app --host 0.0.0.0 --port 8000 --reload
+
+# 2. Start the SvelteKit monitoring dashboard (in a separate terminal)
+npm --prefix dashboard install
+npm --prefix dashboard run dev
+```
+
+Run tests & checks:
+
+```sh
+uv run pytest -v
+uv run ruff check src/ tests/
+npm --prefix dashboard run check && npm --prefix dashboard test
+```
+
+---
+
+## Experiment Results (Measured Phase 2–3 Runs)
+
+### Judge Bias Audit (`RAGTruth`)
+
+- **Status:** `TBD` (`sample_size: 0` / `requested_sample_size: 300` in `artifacts/judge_audit_summary.json`; requires `DEEPSEEK_API_KEY` or `GROQ_API_KEY` in `.env` to run live automated judge scoring).
+
+### Conformal Hallucination Control (`RAGTruth` Test Split, $n_{\text{test}} = 2{,}700$)
+
+Split sizes: `train = 12,072`, `cal = 3,018`, `test = 2,700` (from `artifacts/risk_metrics.json`).
 
 | Guardrail Method | Target Risk $\alpha$ | Empirical False-Accept Rate | Abstention Rate | Brier Score |
 |---|---|---|---|---|
-| Uncalibrated Heuristic Threshold | N/A | TBD | TBD | TBD |
-| Logistic + Split Conformal (MAPIE) | 0.10 | TBD | TBD | TBD |
-| LightGBM + Split Conformal (MAPIE) | 0.10 | TBD | TBD | TBD |
-| LightGBM + Split Conformal (MAPIE) | 0.05 | TBD | TBD | TBD |
+| Uncalibrated Heuristic Threshold (`0.50`) | N/A | 13.52% (`0.1352`) | 34.52% (`0.3452`) | 0.1963 |
+| Logistic + Split Conformal (MAPIE) | 0.10 | 4.67% (`0.0467`) | 65.37% (`0.6537`) | 0.1894 |
+| Logistic + Split Conformal (MAPIE) | 0.05 | 2.33% (`0.0233`) | 76.59% (`0.7659`) | 0.1894 |
+| LightGBM + Split Conformal (MAPIE) | 0.10 | 4.15% (`0.0415`) | 63.15% (`0.6315`) | 0.1734 |
+| LightGBM + Split Conformal (MAPIE) | 0.05 | 1.96% (`0.0196`) | 74.93% (`0.7493`) | 0.1734 |
 
-### Cost-Quality Routing (`RouterBench`)
+- **Calibration ECE:** Uncalibrated Heuristic `0.0650`, Logistic `0.0775`, LightGBM `0.0761`. Both conformal guardrails strictly satisfy empirical false-accept rate $\le \alpha$ at $\alpha \in \{0.05, 0.10\}$, with LightGBM achieving lower abstention and Brier score than Logistic.
+
+### Cost-Quality Routing (`RouterBench`, $n_{\text{test}} = 7{,}214$)
+
+Split sizes: `train = 21,642`, `test = 7,214`, OOD holdout (`mbpp`) `= 427` (from `artifacts/pareto_sweep.json`).
 
 | Routing Strategy | Avg Quality Score | Avg Cost vs. Frontier (%) | Cost Savings (%) |
 |---|---|---|---|
-| Always Frontier Model | TBD | 100% | 0% |
-| Always Small Model | TBD | TBD | TBD |
-| Random Router | TBD | TBD | TBD |
-| Learned Pareto Router | TBD | TBD | TBD |
+| Always Frontier Model | 0.7780 | 100.00% | 0.00% |
+| Always Small Model | 0.3071 | 1.43% | 98.57% |
+| Random Router | 0.5373 | 49.93% | 50.07% |
+| Learned Pareto Router ($\lambda_{\text{cost}} = 0.45$) | 0.7480 | 91.50% | 8.50% |
+
+- **Pareto Summary:** In-domain `AUC-QC = 0.5206` and **8.50%** cost savings at $\ge 95\%$ frontier quality (`0.7480 / 0.7780 = 96.14%` quality retention at $\lambda_{\text{cost}} = 0.45$). On the held-out OOD `mbpp` task (`n = 427`), `AUC-QC = 0.5148` with **3.07%** cost savings at $\ge 95\%$ frontier quality.
 
 ---
 
