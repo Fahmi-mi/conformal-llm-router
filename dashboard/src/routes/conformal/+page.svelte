@@ -43,7 +43,7 @@
 				Conformal Risk Control (RAGTruth)
 			</h1>
 			<p class="text-xs text-[#5C6860] mt-0.5 max-w-[70ch]">
-				Split conformal calibration (MAPIE LAC) across α ∈ [0.01, 0.30] on {conformal?.n_test?.toLocaleString() ?? '2,700'} held-out test specimens ({conformal?.n_cal?.toLocaleString() ?? '3,018'} calibration split).
+				Split conformal calibration (MAPIE LAC) across α ∈ [0.01, 0.30] on {conformal?.n_test?.toLocaleString() ?? '—'} held-out test specimens ({conformal?.n_cal?.toLocaleString() ?? '—'} calibration split).
 			</p>
 		</div>
 

@@ -322,7 +322,7 @@
 									<span class="font-semibold uppercase">{item.tier}</span>
 									<span class="text-[#5C6860]"> · {item.provider}</span>
 									{#if item.cache_hit}
-										<span class="ml-1 text-[10px] font-semibold text-[#1B5642]">CACHE</span>
+										<span class="ml-1 text-[11px] font-semibold text-[#1B5642]">CACHE</span>
 									{/if}
 								</td>
 								<td class="py-2.5 px-2 font-mono-data text-xs">
@@ -348,14 +348,14 @@
 										</div>
 										<div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
 											<div>
-												<div class="font-semibold text-[#5C6860] uppercase text-[10.5px] mb-1">Delivered Answer</div>
+												<div class="font-semibold text-[#5C6860] uppercase text-[11px] mb-1">Delivered Answer</div>
 												<p class="text-[#1C2721] bg-[#FCFBF8] border border-[#DCD6C8] p-2.5 rounded-[2px] leading-relaxed">
 													{item.answer_text}
 												</p>
 											</div>
 											{#if item.draft_answer}
 												<div>
-													<div class="font-semibold text-[#B84A39] uppercase text-[10.5px] mb-1">
+													<div class="font-semibold text-[#9E3829] uppercase text-[11px] mb-1">
 														Blocked Draft Answer (Abstained)
 													</div>
 													<p class="text-[#1C2721] bg-[#FBE9E7] border border-[#E8BEB8] p-2.5 rounded-[2px] leading-relaxed">

@@ -9,7 +9,7 @@
 	const risk = $derived(summary?.risk_metrics);
 	const pareto = $derived(summary?.pareto);
 
-	const judgeReady = $derived(isArtifactReady(judge?.status) && judge?.metrics !== null);
+	const judgeReady = $derived(isArtifactReady(judge?.status) && Boolean(judge?.metrics));
 	const conformalReady = $derived(isArtifactReady(risk?.status));
 	const paretoReady = $derived(isArtifactReady(pareto?.status));
 
@@ -70,7 +70,24 @@
 		</div>
 	</div>
 
-	<!-- Table 1: Conformal Hallucination Control -->
+	{#if consoleState.loading && !summary}
+		<div class="space-y-4" aria-label="Loading offline benchmarks">
+			{#each [0, 1, 2] as idx}
+				<div class="specimen-panel p-4 animate-pulse space-y-3" data-skeleton={idx}>
+					<div class="h-4 w-56 bg-[#E3DDD0] rounded-[2px]"></div>
+					<div class="h-8 bg-[#EFECE3] rounded-[2px]"></div>
+					<div class="h-8 bg-[#EFECE3] rounded-[2px]"></div>
+				</div>
+			{/each}
+		</div>
+	{:else}
+		{#if !summary}
+			<div role="status" class="border border-[#DFB97D] bg-[#FDF6E9] text-[#8F520E] px-4 py-2.5 rounded-[3px] text-xs">
+				Offline benchmark summary could not be loaded from <code class="font-mono-data">/v1/benchmarks/summary</code>. Connect FastAPI or enable Sample Preview [Synthetic]; fields remain <code class="font-mono-data">TBD</code>.
+			</div>
+		{/if}
+
+		<!-- Table 1: Conformal Hallucination Control -->
 	<section class="specimen-panel p-4 space-y-3" aria-label="Conformal hallucination control table">
 		<div class="flex flex-wrap items-center justify-between gap-2">
 			<h2 class="text-sm font-bold text-[#1C2721]">
@@ -132,7 +149,7 @@
 			<div class="flex items-center gap-2">
 				{#if paretoReady && pareto}
 					<span class="font-mono-data text-xs text-[#5C6860]">
-						AUC-QC={formatFixed(pareto.auc_qc, 4)} · Savings@95%={formatPct(pareto.cost_savings_at_95pct_quality, 1)} · OOD ({pareto.ood_tasks?.join(', ') || 'mbpp'}) AUC-QC={formatFixed(pareto.ood_auc_qc, 4)}
+						AUC-QC={formatFixed(pareto.auc_qc, 4)} · Savings@95%={formatPct(pareto.cost_savings_at_95pct_quality, 1)}{#if pareto.ood_available} · OOD ({pareto.ood_tasks?.join(', ') || 'mbpp'}) AUC-QC={formatFixed(pareto.ood_auc_qc, 4)}{/if}
 					</span>
 				{/if}
 				<DecisionBadge variant={paretoReady ? 'READY' : 'TBD'} />
@@ -275,4 +292,5 @@
 			</div>
 		{/if}
 	</section>
+	{/if}
 </div>

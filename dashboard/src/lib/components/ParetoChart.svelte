@@ -195,6 +195,8 @@
 							aria-label="Lambda {pt.lambda_cost.toFixed(2)}: quality {(pt.avg_quality * 100).toFixed(1)}%, cost {(pt.normalized_cost * 100).toFixed(1)}%"
 							onmouseenter={() => (hoveredPoint = pt)}
 							onmouseleave={() => (hoveredPoint = null)}
+							onfocus={() => (hoveredPoint = pt)}
+							onblur={() => (hoveredPoint = null)}
 							onclick={() => onSelectLambda(pt.lambda_cost)}
 							onkeydown={(e) => {
 								if (e.key === 'Enter' || e.key === ' ') {
@@ -243,7 +245,7 @@
 					y1={pad.top}
 					x2={xPx(liveNormCost)}
 					y2={H - pad.bottom}
-					stroke="#B46914"
+					stroke="#1C2721"
 					stroke-width="1.5"
 					stroke-dasharray="2 2"
 				/>
@@ -252,9 +254,9 @@
 					y={pad.top + 11}
 					text-anchor={liveNormCost > 0.7 ? 'end' : 'start'}
 					dx={liveNormCost > 0.7 ? -4 : 4}
-					font-size="10"
+					font-size="11"
 					font-weight="600"
-					fill="#8F520E"
+					fill="#1C2721"
 				>
 					Live Cost {(liveNormCost * 100).toFixed(1)}%
 				</text>

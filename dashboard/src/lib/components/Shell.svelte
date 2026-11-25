@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { page } from '$app/state';
+	import { classifyGatewayStatus } from '#lib/analytics';
 	import { consoleState } from '#lib/state.svelte';
 	import ControlBar from './ControlBar.svelte';
 	import DecisionBadge from './DecisionBadge.svelte';
@@ -22,19 +23,14 @@
 		return pathname.startsWith(href);
 	}
 
-	const healthLabel = $derived.by(() => {
-		if (consoleState.syntheticPreview) return 'Nominal (Preview)';
-		if (consoleState.loading && !consoleState.health && !consoleState.gatewayError) return 'Checking…';
-		if (consoleState.gatewayError?.unreachable || !consoleState.health) return 'Unreachable';
-		return consoleState.health.status === 'ok' ? 'Nominal' : 'Degraded';
-	});
-
-	const healthBadgeClass = $derived.by(() => {
-		if (consoleState.syntheticPreview) return 'bg-[#B46914] text-[#FAF8F3]';
-		if (consoleState.gatewayError?.unreachable || !consoleState.health) return 'bg-[#B84A39] text-[#FAF8F3]';
-		if (consoleState.health.status === 'ok') return 'bg-[#236B52] text-[#FAF8F3]';
-		return 'bg-[#B46914] text-[#FAF8F3]';
-	});
+	const gatewayStatus = $derived(
+		classifyGatewayStatus({
+			syntheticPreview: consoleState.syntheticPreview,
+			loading: consoleState.loading,
+			health: consoleState.health,
+			gatewayError: consoleState.gatewayError
+		})
+	);
 
 	const providerSummary = $derived.by(() => {
 		const providers = consoleState.health?.providers;
@@ -53,8 +49,8 @@
 			<div class="text-[11px] uppercase tracking-[0.12em] text-[#9FB3A6]">Statistical AI Control</div>
 		</div>
 		<div class="flex items-center gap-2.5">
-			<span class="px-2 py-0.5 rounded-[2px] text-[11px] font-semibold uppercase {healthBadgeClass}">
-				{healthLabel}
+			<span class="px-2 py-0.5 rounded-[2px] text-[11px] font-semibold uppercase {gatewayStatus.railClass}">
+				{gatewayStatus.railLabel}
 			</span>
 			<button
 				type="button"
@@ -136,7 +132,7 @@
 		<div class="border-t border-[#2F4036] pt-4 px-2 space-y-2 text-xs text-[#C9D2CB]">
 			<div class="flex items-center justify-between gap-2">
 				<span>Gateway Health</span>
-				<strong class="text-[#FAF8F3]">{healthLabel}</strong>
+				<strong class="text-[#FAF8F3]">{gatewayStatus.railLabel}</strong>
 			</div>
 			<div class="text-xs leading-relaxed text-[#A9B8AE]">
 				{providerSummary}
@@ -145,23 +141,9 @@
 				{consoleState.gatewayBaseUrl}
 			</div>
 			<div class="pt-1 flex flex-wrap gap-1.5">
-				{#if consoleState.syntheticPreview}
-					<span class="inline-block px-2 py-0.5 rounded-[2px] text-[11px] font-semibold bg-[#B46914] text-[#FAF8F3]">
-						PREVIEW · [SYNTHETIC]
-					</span>
-				{:else if consoleState.health?.status === 'ok'}
-					<span class="inline-block px-2 py-0.5 rounded-[2px] text-[11px] font-semibold bg-[#236B52] text-[#FAF8F3]">
-						LIVE GATEWAY
-					</span>
-				{:else if consoleState.health?.status === 'degraded'}
-					<span class="inline-block px-2 py-0.5 rounded-[2px] text-[11px] font-semibold bg-[#B46914] text-[#FAF8F3]">
-						GATEWAY DEGRADED
-					</span>
-				{:else}
-					<span class="inline-block px-2 py-0.5 rounded-[2px] text-[11px] font-semibold bg-[#2A3A31] text-[#EDE8DC]">
-						OFFLINE / STANDBY
-					</span>
-				{/if}
+				<span class="inline-block px-2 py-0.5 rounded-[2px] text-[11px] font-semibold {gatewayStatus.pillClass}">
+					{gatewayStatus.pillLabel}
+				</span>
 			</div>
 		</div>
 	</aside>
@@ -187,7 +169,7 @@
 					Exit Preview
 				</button>
 			</div>
-		{:else if consoleState.gatewayError?.unreachable}
+		{:else if consoleState.gatewayError}
 			<div
 				role="alert"
 				class="border border-[#B84A39] bg-[#FBE9E7] text-[#8E3224] px-4 py-3 rounded-[3px] flex flex-wrap items-center justify-between gap-3 text-xs"
@@ -195,10 +177,20 @@
 				<div class="flex items-start sm:items-center gap-2.5 min-w-0">
 					<Icon name="warning" size={16} class="shrink-0 mt-0.5 sm:mt-0" />
 					<div>
-						<strong>Gateway Unreachable</strong> at <code class="font-mono-data">{consoleState.gatewayBaseUrl}</code>
-						<span class="block sm:inline sm:ml-1 text-[#7B2D21]">
-							({consoleState.gatewayError.detail}). Start FastAPI or enable Sample Preview to inspect the interface.
-						</span>
+						{#if consoleState.gatewayError.unreachable}
+							<strong>Gateway Unreachable</strong> at <code class="font-mono-data">{consoleState.gatewayBaseUrl}</code>
+							<span class="block sm:inline sm:ml-1 text-[#7B2D21]">
+								({consoleState.gatewayError.detail}). Start FastAPI or enable Sample Preview to inspect the interface.
+							</span>
+						{:else}
+							<strong>
+								Gateway Error{consoleState.gatewayError.status > 0 ? ` (HTTP ${consoleState.gatewayError.status})` : ''}
+							</strong>
+							at <code class="font-mono-data">{consoleState.gatewayBaseUrl}</code>
+							<span class="block sm:inline sm:ml-1 text-[#7B2D21]">
+								— {consoleState.gatewayError.detail}
+							</span>
+						{/if}
 					</div>
 				</div>
 				<div class="flex items-center gap-2 shrink-0">

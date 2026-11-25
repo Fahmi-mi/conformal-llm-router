@@ -1,5 +1,5 @@
 import { PUBLIC_GATEWAY_URL } from '$app/env/public';
-import { clampAlpha, clampLambda } from './analytics';
+import { clampAlpha, clampLambda, type GatewayErrorState } from './analytics';
 import { createGatewayClient, DEFAULT_GATEWAY_URL, GatewayApiError } from './api';
 import {
 	buildSyntheticParetoTelemetry,
@@ -28,12 +28,19 @@ class ConsoleState {
 	paretoTelemetry = $state<ParetoTelemetryResponse | null>(null);
 	benchmarks = $state<BenchmarksSummaryResponse | null>(null);
 	recentAudit = $state<AuditListResponse | null>(null);
-	gatewayError = $state<{ detail: string; unreachable: boolean } | null>(null);
+	gatewayError = $state<GatewayErrorState | null>(null);
 	lastSyncedAt = $state<string | null>(null);
 	mobileNavOpen = $state(false);
 
 	private paretoTimer: ReturnType<typeof setTimeout> | null = null;
 	private initialized = false;
+
+	private clearParetoTimer(): void {
+		if (this.paretoTimer) {
+			clearTimeout(this.paretoTimer);
+			this.paretoTimer = null;
+		}
+	}
 
 	get gatewayBaseUrl(): string {
 		return resolveGatewayUrl();
@@ -50,6 +57,7 @@ class ConsoleState {
 	}
 
 	async refreshAll(): Promise<void> {
+		this.clearParetoTimer();
 		if (this.syntheticPreview) {
 			this.health = SYNTHETIC_HEALTH;
 			this.paretoTelemetry = buildSyntheticParetoTelemetry(this.alpha, this.lambdaCost);
@@ -120,12 +128,14 @@ class ConsoleState {
 		) {
 			const err = firstErr as GatewayApiError | null;
 			this.gatewayError = {
+				status: err?.status ?? 0,
 				detail: err?.detail ?? 'Unable to connect to FastAPI gateway.',
 				unreachable: err?.unreachable ?? true
 			};
 		} else if (firstErr) {
 			const err = firstErr as GatewayApiError;
 			this.gatewayError = {
+				status: err.status,
 				detail: err.detail,
 				unreachable: err.unreachable
 			};
@@ -139,24 +149,31 @@ class ConsoleState {
 	}
 
 	private scheduleParetoRefresh(): void {
+		this.clearParetoTimer();
 		if (this.syntheticPreview) {
 			this.paretoTelemetry = buildSyntheticParetoTelemetry(this.alpha, this.lambdaCost);
 			return;
 		}
-		if (this.paretoTimer) clearTimeout(this.paretoTimer);
 		this.paretoTimer = setTimeout(async () => {
+			if (this.syntheticPreview) return;
 			try {
 				const data = await this.client().getParetoTelemetry({
 					alpha: this.alpha,
 					lambda_cost: this.lambdaCost
 				});
+				if (this.syntheticPreview) return;
 				this.paretoTelemetry = data;
-				if (this.gatewayError?.unreachable) {
+				if (this.gatewayError) {
 					this.gatewayError = null;
 				}
 			} catch (err) {
+				if (this.syntheticPreview) return;
 				if (err instanceof GatewayApiError) {
-					this.gatewayError = { detail: err.detail, unreachable: err.unreachable };
+					this.gatewayError = {
+						status: err.status,
+						detail: err.detail,
+						unreachable: err.unreachable
+					};
 				}
 			}
 		}, 160);
@@ -173,6 +190,7 @@ class ConsoleState {
 	}
 
 	async setSyntheticPreview(enabled: boolean): Promise<void> {
+		this.clearParetoTimer();
 		this.syntheticPreview = enabled;
 		await this.refreshAll();
 	}

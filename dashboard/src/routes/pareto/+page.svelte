@@ -93,7 +93,7 @@
 						? 'bg-[#1C2721] text-[#FAF8F3]'
 						: 'text-[#5C6860] hover:text-[#1C2721]'}"
 				>
-					In-Domain ({pareto?.n_test?.toLocaleString() ?? '7,214'})
+					In-Domain ({pareto?.n_test?.toLocaleString() ?? '—'})
 				</button>
 				<button
 					type="button"

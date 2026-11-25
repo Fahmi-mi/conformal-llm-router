@@ -135,7 +135,7 @@
 						x={W - pad.right + 8}
 						y={yAbstainPx(tick) + 3.5}
 						text-anchor="start"
-						font-size="10"
+						font-size="10.5"
 						fill="#236B52"
 						class="font-mono-data"
 					>
@@ -243,6 +243,8 @@
 							aria-label="Alpha {pt.alpha.toFixed(2)}: false-accept {(pt.false_accept_rate * 100).toFixed(2)}%, abstention {(pt.abstention_rate * 100).toFixed(1)}%"
 							onmouseenter={() => (hoveredPoint = pt)}
 							onmouseleave={() => (hoveredPoint = null)}
+							onfocus={() => (hoveredPoint = pt)}
+							onblur={() => (hoveredPoint = null)}
 							onclick={() => onSelectAlpha(pt.alpha)}
 							onkeydown={(e) => {
 								if (e.key === 'Enter' || e.key === ' ') {

@@ -444,21 +444,21 @@
 
 					<div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs border-b border-[#ECE7DC] pb-3">
 						<div>
-							<div class="text-[10.5px] uppercase text-[#5C6860] font-semibold">Model Used</div>
+							<div class="text-[11px] uppercase text-[#5C6860] font-semibold">Model Used</div>
 							<div class="font-mono-data text-[#1C2721] truncate" title={r.model_used}>{r.model_used}</div>
 						</div>
 						<div>
-							<div class="text-[10.5px] uppercase text-[#5C6860] font-semibold">Risk Score</div>
+							<div class="text-[11px] uppercase text-[#5C6860] font-semibold">Risk Score</div>
 							<div class="font-mono-data text-[#1C2721]">
 								{r.calibrated_risk_score !== null ? r.calibrated_risk_score.toFixed(4) : 'UNSCORED'}
 							</div>
 						</div>
 						<div>
-							<div class="text-[10.5px] uppercase text-[#5C6860] font-semibold">Est. Cost</div>
+							<div class="text-[11px] uppercase text-[#5C6860] font-semibold">Est. Cost</div>
 							<div class="font-mono-data text-[#1C2721]">{formatUsd(r.estimated_cost_usd)}</div>
 						</div>
 						<div>
-							<div class="text-[10.5px] uppercase text-[#5C6860] font-semibold">Latency · Params</div>
+							<div class="text-[11px] uppercase text-[#5C6860] font-semibold">Latency · Params</div>
 							<div class="font-mono-data text-[#1C2721]">
 								{formatLatencyMs(r.latency_ms)} · α={r.alpha_used.toFixed(2)} λ={r.lambda_cost_used.toFixed(2)}
 							</div>
@@ -467,7 +467,7 @@
 
 					<div class="space-y-2.5 text-xs">
 						<div>
-							<div class="text-[10.5px] uppercase tracking-wider font-semibold text-[#5C6860] mb-1">
+							<div class="text-[11px] uppercase tracking-wider font-semibold text-[#5C6860] mb-1">
 								Gateway Response
 							</div>
 							<div class="bg-[#F6F3EC] border border-[#DCD6C8] p-3 rounded-[2px] text-[#1C2721] leading-relaxed whitespace-pre-wrap">
@@ -477,7 +477,7 @@
 
 						{#if r.draft_answer}
 							<div>
-								<div class="text-[10.5px] uppercase tracking-wider font-semibold text-[#B84A39] mb-1">
+								<div class="text-[11px] uppercase tracking-wider font-semibold text-[#9E3829] mb-1">
 									Blocked Draft Answer (Held Back by Conformal Gate)
 								</div>
 								<div class="bg-[#FBE9E7] border border-[#E8BEB8] p-3 rounded-[2px] text-[#1C2721] leading-relaxed whitespace-pre-wrap">
@@ -499,7 +499,7 @@
 				{#if !riskResult}
 					<div class="py-10 text-center text-xs text-[#5C6860] space-y-1.5">
 						<p class="font-semibold text-[#1C2721]">No risk score computed yet</p>
-						<p>Score any `(query, context, candidate_answer)` tuple directly against the LightGBM + MAPIE conformal threshold without invoking an LLM.</p>
+						<p>Score any <code class="font-mono-data">(query, context, candidate_answer)</code> tuple directly against the LightGBM + MAPIE conformal threshold without invoking an LLM.</p>
 					</div>
 				{:else}
 					{@const er = riskResult.data}
@@ -517,19 +517,19 @@
 
 					<div class="grid grid-cols-3 gap-2 text-xs border-b border-[#ECE7DC] pb-3">
 						<div>
-							<div class="text-[10.5px] uppercase text-[#5C6860] font-semibold">Calibrated Risk</div>
+							<div class="text-[11px] uppercase text-[#5C6860] font-semibold">Calibrated Risk</div>
 							<div class="font-mono-data text-lg font-bold {er.conformal_decision === 'ABSTAIN' ? 'text-[#B84A39]' : 'text-[#236B52]'}">
 								{er.calibrated_risk_score.toFixed(4)}
 							</div>
 						</div>
 						<div>
-							<div class="text-[10.5px] uppercase text-[#5C6860] font-semibold">Conformal Cutoff τ</div>
+							<div class="text-[11px] uppercase text-[#5C6860] font-semibold">Conformal Cutoff τ</div>
 							<div class="font-mono-data text-lg font-bold text-[#1C2721]">
 								{er.threshold_used.toFixed(4)}
 							</div>
 						</div>
 						<div>
-							<div class="text-[10.5px] uppercase text-[#5C6860] font-semibold">Margin (τ − Risk)</div>
+							<div class="text-[11px] uppercase text-[#5C6860] font-semibold">Margin (τ − Risk)</div>
 							<div class="font-mono-data text-lg font-bold text-[#1C2721]">
 								{(er.threshold_used - er.calibrated_risk_score).toFixed(4)}
 							</div>

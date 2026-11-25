@@ -1,11 +1,13 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { untrack } from 'svelte';
 	import {
+		computeNextAuditOffset,
 		filterSyntheticAuditRecords,
 		formatLatencyMs,
 		formatSpecimenId,
 		formatTimestamp,
-		formatUsd
+		formatUsd,
+		resolveSelectedAuditRecord
 	} from '#lib/analytics';
 	import { GatewayApiError } from '#lib/api';
 	import DecisionBadge from '#lib/components/DecisionBadge.svelte';
@@ -30,9 +32,15 @@
 	let selectedRecord = $state<AuditRecord | null>(null);
 
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+	let requestSeq = 0;
 
 	async function loadAudit(resetOffset = false) {
+		if (debounceTimer) {
+			clearTimeout(debounceTimer);
+			debounceTimer = null;
+		}
 		if (resetOffset) offset = 0;
+		const reqId = ++requestSeq;
 		loading = true;
 		errorMsg = null;
 
@@ -46,11 +54,10 @@
 				cache_hit: cacheHitParam,
 				q: searchQuery
 			});
+			if (reqId !== requestSeq) return;
 			total = filtered.length;
 			items = filtered.slice(offset, offset + PAGE_SIZE);
-			if (!selectedRecord || !items.some((r) => r.request_id === selectedRecord?.request_id)) {
-				selectedRecord = items[0] ?? null;
-			}
+			selectedRecord = resolveSelectedAuditRecord(items, selectedRecord);
 			loading = false;
 			return;
 		}
@@ -64,12 +71,12 @@
 				cache_hit: cacheHitParam,
 				q: searchQuery || null
 			});
+			if (reqId !== requestSeq) return;
 			items = res.items;
 			total = res.total;
-			if (!selectedRecord || !items.some((r) => r.request_id === selectedRecord?.request_id)) {
-				selectedRecord = items[0] ?? null;
-			}
+			selectedRecord = resolveSelectedAuditRecord(items, selectedRecord);
 		} catch (err) {
+			if (reqId !== requestSeq) return;
 			items = [];
 			total = 0;
 			selectedRecord = null;
@@ -78,13 +85,16 @@
 					? err.detail
 					: 'Unable to fetch audit records from gateway.';
 		} finally {
-			loading = false;
+			if (reqId === requestSeq) {
+				loading = false;
+			}
 		}
 	}
 
 	function scheduleSearch() {
 		if (debounceTimer) clearTimeout(debounceTimer);
 		debounceTimer = setTimeout(() => {
+			debounceTimer = null;
 			void loadAudit(true);
 		}, 220);
 	}
@@ -97,15 +107,12 @@
 		void loadAudit(true);
 	}
 
-	onMount(() => {
-		void loadAudit(true);
-	});
-
 	$effect(() => {
-		// Re-query immediately when user toggles global Sample Preview mode.
 		const _isSynthetic = consoleState.syntheticPreview;
 		void _isSynthetic;
-		void loadAudit(true);
+		untrack(() => {
+			void loadAudit(true);
+		});
 	});
 </script>
 
@@ -263,13 +270,13 @@
 										<span class="font-semibold uppercase text-[#1C2721]">{row.tier}</span>
 										<span class="text-[#5C6860]"> · {row.provider}</span>
 										{#if row.escalated_from_tier1}
-											<span class="ml-1 text-[10px] font-semibold text-[#B84A39]">ESC</span>
+											<span class="ml-1 text-[11px] font-semibold text-[#9E3829]">ESC</span>
 										{/if}
 										{#if row.cache_hit}
-											<span class="ml-1 text-[10px] font-semibold text-[#236B52]">HIT</span>
+											<span class="ml-1 text-[11px] font-semibold text-[#1B5642]">HIT</span>
 										{/if}
 										{#if row.fallback_used}
-											<span class="ml-1 text-[10px] font-semibold text-[#B46914]">FB</span>
+											<span class="ml-1 text-[11px] font-semibold text-[#8F520E]">FB</span>
 										{/if}
 									</td>
 									<td class="py-2.5 px-2 font-mono-data text-xs">
@@ -297,7 +304,7 @@
 							type="button"
 							disabled={offset === 0}
 							onclick={() => {
-								offset = Math.max(0, offset - PAGE_SIZE);
+								offset = computeNextAuditOffset(offset, PAGE_SIZE, total, 'prev');
 								void loadAudit(false);
 							}}
 							class="px-2.5 py-1 border border-[#DCD6C8] bg-[#FCFBF8] text-[#1C2721] rounded-[2px] disabled:opacity-45 cursor-pointer"
@@ -308,7 +315,7 @@
 							type="button"
 							disabled={offset + items.length >= total}
 							onclick={() => {
-								offset += PAGE_SIZE;
+								offset = computeNextAuditOffset(offset, PAGE_SIZE, total, 'next');
 								void loadAudit(false);
 							}}
 							class="px-2.5 py-1 border border-[#DCD6C8] bg-[#FCFBF8] text-[#1C2721] rounded-[2px] disabled:opacity-45 cursor-pointer"
@@ -356,19 +363,19 @@
 
 				<div class="grid grid-cols-3 gap-2 text-xs border-b border-[#ECE7DC] pb-3">
 					<div>
-						<div class="text-[10.5px] uppercase text-[#5C6860] font-semibold">Model</div>
+						<div class="text-[11px] uppercase text-[#5C6860] font-semibold">Model</div>
 						<div class="font-mono-data text-[#1C2721] truncate" title={selectedRecord.model_used}>
 							{selectedRecord.model_used}
 						</div>
 					</div>
 					<div>
-						<div class="text-[10.5px] uppercase text-[#5C6860] font-semibold">Cost / Frontier</div>
+						<div class="text-[11px] uppercase text-[#5C6860] font-semibold">Cost / Frontier</div>
 						<div class="font-mono-data text-[#1C2721]">
 							{formatUsd(selectedRecord.estimated_cost_usd)} / {formatUsd(selectedRecord.frontier_cost_usd)}
 						</div>
 					</div>
 					<div>
-						<div class="text-[10.5px] uppercase text-[#5C6860] font-semibold">Latency · Params</div>
+						<div class="text-[11px] uppercase text-[#5C6860] font-semibold">Latency · Params</div>
 						<div class="font-mono-data text-[#1C2721]">
 							{formatLatencyMs(selectedRecord.latency_ms)} · α={selectedRecord.alpha_used.toFixed(2)} λ={selectedRecord.lambda_cost_used.toFixed(2)}
 						</div>
@@ -377,7 +384,7 @@
 
 				<div class="space-y-2.5 text-xs">
 					<div>
-						<div class="text-[10.5px] uppercase tracking-wider font-semibold text-[#5C6860] mb-1">
+						<div class="text-[11px] uppercase tracking-wider font-semibold text-[#5C6860] mb-1">
 							Query Text
 						</div>
 						<div class="bg-[#F6F3EC] border border-[#DCD6C8] p-2.5 rounded-[2px] text-[#1C2721] leading-relaxed whitespace-pre-wrap">
@@ -386,7 +393,7 @@
 					</div>
 
 					<div>
-						<div class="text-[10.5px] uppercase tracking-wider font-semibold text-[#5C6860] mb-1">
+						<div class="text-[11px] uppercase tracking-wider font-semibold text-[#5C6860] mb-1">
 							Retrieval Context
 						</div>
 						{#if selectedRecord.context_text}
@@ -401,7 +408,7 @@
 					</div>
 
 					<div>
-						<div class="text-[10.5px] uppercase tracking-wider font-semibold text-[#5C6860] mb-1">
+						<div class="text-[11px] uppercase tracking-wider font-semibold text-[#5C6860] mb-1">
 							Delivered Answer
 						</div>
 						<div class="bg-[#FCFBF8] border border-[#DCD6C8] p-2.5 rounded-[2px] text-[#1C2721] leading-relaxed whitespace-pre-wrap">
@@ -411,7 +418,7 @@
 
 					{#if selectedRecord.draft_answer}
 						<div>
-							<div class="flex items-center gap-1.5 text-[10.5px] uppercase tracking-wider font-semibold text-[#B84A39] mb-1">
+							<div class="flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-semibold text-[#9E3829] mb-1">
 								<Icon name="shield" size={13} />
 								<span>Blocked Draft Answer (Abstained by MAPIE Gate)</span>
 							</div>

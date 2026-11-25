@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
 	clampAlpha,
 	clampLambda,
+	classifyGatewayStatus,
+	computeNextAuditOffset,
 	filterSyntheticAuditRecords,
 	findNearestConformalPoint,
 	findNearestParetoPoint,
@@ -10,11 +12,13 @@ import {
 	formatQualityRetention,
 	formatSpecimenId,
 	formatUsd,
-	isArtifactReady
+	isArtifactReady,
+	resolveSelectedAuditRecord
 } from './analytics';
 import {
 	SYNTHETIC_AUDIT_RECORDS,
 	SYNTHETIC_CONFORMAL_SWEEP,
+	SYNTHETIC_HEALTH,
 	SYNTHETIC_PARETO_CURVE
 } from './synthetic';
 
@@ -68,5 +72,58 @@ describe('analytics helpers', () => {
 			q: 'lease'
 		});
 		expect(leaseMatches).toHaveLength(2);
+	});
+
+	it('classifies HTTP 503 vs unreachable vs degraded vs synthetic gateway states', () => {
+		const err503 = classifyGatewayStatus({
+			syntheticPreview: false,
+			loading: false,
+			health: SYNTHETIC_HEALTH,
+			gatewayError: { status: 503, detail: 'Model artifacts missing', unreachable: false }
+		});
+		expect(err503.kind).toBe('http-error');
+		expect(err503.railLabel).toBe('HTTP 503');
+		expect(err503.pillLabel).toBe('GATEWAY HTTP 503');
+
+		const unreachable = classifyGatewayStatus({
+			syntheticPreview: false,
+			loading: false,
+			health: null,
+			gatewayError: { status: 0, detail: 'fetch failed', unreachable: true }
+		});
+		expect(unreachable.kind).toBe('unreachable');
+		expect(unreachable.railLabel).toBe('Unreachable');
+
+		const degraded = classifyGatewayStatus({
+			syntheticPreview: false,
+			loading: false,
+			health: { ...SYNTHETIC_HEALTH, status: 'degraded' },
+			gatewayError: null
+		});
+		expect(degraded.kind).toBe('degraded');
+		expect(degraded.railLabel).toBe('Degraded');
+
+		const preview = classifyGatewayStatus({
+			syntheticPreview: true,
+			loading: false,
+			health: null,
+			gatewayError: { status: 503, detail: 'ignored in preview', unreachable: false }
+		});
+		expect(preview.kind).toBe('synthetic');
+		expect(preview.railLabel).toBe('Nominal (Preview)');
+	});
+
+	it('computes audit pagination offsets and preserves selected record', () => {
+		expect(computeNextAuditOffset(0, 25, 60, 'prev')).toBe(0);
+		expect(computeNextAuditOffset(0, 25, 60, 'next')).toBe(25);
+		expect(computeNextAuditOffset(25, 25, 60, 'next')).toBe(50);
+		expect(computeNextAuditOffset(50, 25, 60, 'next')).toBe(50);
+
+		const second = SYNTHETIC_AUDIT_RECORDS[1];
+		expect(resolveSelectedAuditRecord(SYNTHETIC_AUDIT_RECORDS, second)?.request_id).toBe(second.request_id);
+		expect(resolveSelectedAuditRecord(SYNTHETIC_AUDIT_RECORDS.slice(2), second)?.request_id).toBe(
+			SYNTHETIC_AUDIT_RECORDS[2].request_id
+		);
+		expect(resolveSelectedAuditRecord([], second)).toBeNull();
 	});
 });

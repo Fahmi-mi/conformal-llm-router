@@ -1,8 +1,118 @@
 import type {
 	AuditRecord,
 	ConformalSweepPoint,
+	HealthResponse,
 	ParetoCurvePoint
 } from './types';
+
+export interface GatewayErrorState {
+	status: number;
+	detail: string;
+	unreachable: boolean;
+}
+
+export interface GatewayStatusSummary {
+	kind: 'synthetic' | 'checking' | 'unreachable' | 'http-error' | 'degraded' | 'nominal' | 'offline';
+	railLabel: string;
+	railClass: string;
+	pillLabel: string;
+	pillClass: string;
+}
+
+export function classifyGatewayStatus(opts: {
+	syntheticPreview: boolean;
+	loading: boolean;
+	health: HealthResponse | null;
+	gatewayError: GatewayErrorState | null;
+}): GatewayStatusSummary {
+	if (opts.syntheticPreview) {
+		return {
+			kind: 'synthetic',
+			railLabel: 'Nominal (Preview)',
+			railClass: 'bg-[#B46914] text-[#FAF8F3]',
+			pillLabel: 'PREVIEW · [SYNTHETIC]',
+			pillClass: 'bg-[#B46914] text-[#FAF8F3]'
+		};
+	}
+	if (opts.loading && !opts.health && !opts.gatewayError) {
+		return {
+			kind: 'checking',
+			railLabel: 'Checking…',
+			railClass: 'bg-[#2A3A31] text-[#EDE8DC]',
+			pillLabel: 'CHECKING',
+			pillClass: 'bg-[#2A3A31] text-[#EDE8DC]'
+		};
+	}
+	if (opts.gatewayError) {
+		if (opts.gatewayError.unreachable) {
+			return {
+				kind: 'unreachable',
+				railLabel: 'Unreachable',
+				railClass: 'bg-[#B84A39] text-[#FAF8F3]',
+				pillLabel: 'OFFLINE / UNREACHABLE',
+				pillClass: 'bg-[#B84A39] text-[#FAF8F3]'
+			};
+		}
+		const statusLabel = opts.gatewayError.status > 0 ? `HTTP ${opts.gatewayError.status}` : 'Error';
+		return {
+			kind: 'http-error',
+			railLabel: statusLabel,
+			railClass: 'bg-[#B84A39] text-[#FAF8F3]',
+			pillLabel: `GATEWAY ${statusLabel}`,
+			pillClass: 'bg-[#B84A39] text-[#FAF8F3]'
+		};
+	}
+	if (!opts.health) {
+		return {
+			kind: 'offline',
+			railLabel: 'Unreachable',
+			railClass: 'bg-[#B84A39] text-[#FAF8F3]',
+			pillLabel: 'OFFLINE / STANDBY',
+			pillClass: 'bg-[#2A3A31] text-[#EDE8DC]'
+		};
+	}
+	if (opts.health.status === 'ok') {
+		return {
+			kind: 'nominal',
+			railLabel: 'Nominal',
+			railClass: 'bg-[#236B52] text-[#FAF8F3]',
+			pillLabel: 'LIVE GATEWAY',
+			pillClass: 'bg-[#236B52] text-[#FAF8F3]'
+		};
+	}
+	return {
+		kind: 'degraded',
+		railLabel: 'Degraded',
+		railClass: 'bg-[#B46914] text-[#FAF8F3]',
+		pillLabel: 'GATEWAY DEGRADED',
+		pillClass: 'bg-[#B46914] text-[#FAF8F3]'
+	};
+}
+
+export function computeNextAuditOffset(
+	currentOffset: number,
+	pageSize: number,
+	total: number,
+	direction: 'prev' | 'next'
+): number {
+	if (direction === 'prev') {
+		return Math.max(0, currentOffset - pageSize);
+	}
+	const next = currentOffset + pageSize;
+	return next < total ? next : currentOffset;
+}
+
+export function resolveSelectedAuditRecord(
+	items: AuditRecord[],
+	current: AuditRecord | null
+): AuditRecord | null {
+	if (items.length === 0) return null;
+	if (current) {
+		const updated = items.find((r) => r.request_id === current.request_id);
+		if (updated) return updated;
+	}
+	return items[0];
+}
 
 export function clampAlpha(value: number): number {
 	if (!Number.isFinite(value)) return 0.1;
