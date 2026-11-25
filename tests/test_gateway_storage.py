@@ -103,11 +103,16 @@ def test_query_request_and_evaluate_risk_validation() -> None:
 
     req = QueryRequest(
         query="  Explain split conformal prediction  ",
+        context="   \t\n  ",
         alpha_override=0.10,
         lambda_cost_override=0.50,
     )
     assert req.query == "Explain split conformal prediction"
+    assert req.context is None
     assert req.bypass_cache is False
+
+    req_with_ctx = QueryRequest(query="valid", context="  retrieved context  ")
+    assert req_with_ctx.context == "retrieved context"
 
     for bad_kwargs in (
         {"query": "  ", "context": "ctx", "candidate_answer": "ans"},
@@ -241,9 +246,17 @@ def test_semantic_cache_ignores_abstain_and_hits_pass_and_unscored(tmp_path: Pat
     assert hit_unscored is not None
     assert hit_unscored["request_id"] == "req-unscored"
 
-    # Zero-norm and NaN embeddings handled safely without crashing
+    # Zero-norm, NaN, and Inf embeddings handled safely without crashing
     assert cache.lookup(np.zeros(16, dtype=np.float32)) is None
     cache.put(np.zeros(16, dtype=np.float32), _make_record("req-zero"))
+
+    nan_vec = np.full(16, np.nan, dtype=np.float32)
+    inf_vec = np.full(16, np.inf, dtype=np.float32)
+    assert cache.lookup(nan_vec) is None
+    assert cache.lookup(inf_vec) is None
+    cache.put(nan_vec, _make_record("req-nan"))
+    cache.put(inf_vec, _make_record("req-inf"))
+    assert cache._index.ntotal == 2
 
     with pytest.raises(ValueError):
         cache.lookup(np.ones(8, dtype=np.float32))
@@ -257,6 +270,12 @@ def test_semantic_cache_ignores_abstain_and_hits_pass_and_unscored(tmp_path: Pat
     persisted_hit = reloaded.lookup(v_near)
     assert persisted_hit is not None
     assert persisted_hit["request_id"] == "req-pass"
+
+    # Reloading existing FAISS index with mismatched embedding_dim raises ValueError
+    with pytest.raises(ValueError, match="embedding_dim"):
+        SemanticCache(
+            index_path=index_path, store=store, similarity_threshold=0.92, embedding_dim=32
+        )
 
 
 def test_telemetry_store_query_audit_filters_and_pagination(tmp_path: Path) -> None:
@@ -466,4 +485,89 @@ def test_telemetry_store_closes_connections_and_pareto_uses_single_projected_que
     assert "SELECT *" not in executed_sql[0]
     for excluded_col in ("query_text", "context_text", "answer_text", "draft_answer", "evidence_json"):
         assert excluded_col not in executed_sql[0]
+
+
+def test_semantic_cache_lookup_predicate_avoids_shadowing_and_put_rolls_back_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    import faiss
+
+    store = TelemetryStore(tmp_path / "telemetry.db")
+    store.init_schema()
+    index_path = tmp_path / "faiss.index"
+    cache = SemanticCache(index_path=index_path, store=store, similarity_threshold=0.92, embedding_dim=16)
+
+    vec = _unit_vec(16, 0)
+    unscored = _make_record(
+        "req-0",
+        context_text=None,
+        conformal_decision="UNSCORED",
+        calibrated_risk_score=None,
+        evidence=None,
+    )
+    scored = _make_record("req-1", context_text="ctx", conformal_decision="PASS")
+    cache.put(vec, unscored)
+    cache.put(vec, scored)
+    assert cache._index.ntotal == 2
+
+    # Without predicate, top match works as before; with predicate, req-0 never shadows req-1
+    assert cache.lookup(vec) is not None
+    matched = cache.lookup(vec, predicate=lambda rec: rec.get("conformal_decision") == "PASS")
+    assert matched is not None
+    assert matched["request_id"] == "req-1"
+    assert cache.lookup(vec, predicate=lambda _rec: False) is None
+
+    # Failed SQLite registration rolls back in-memory index and never persists an orphaned vector
+    def _fail_register(_faiss_id: int, _request_id: str) -> None:
+        raise sqlite3.OperationalError("simulated sqlite failure")
+
+    monkeypatch.setattr(store, "register_cache_entry", _fail_register)
+    with pytest.raises(sqlite3.OperationalError):
+        cache.put(_unit_vec(16, 1), _make_record("req-fail-sql"))
+
+    assert cache._index.ntotal == 2
+    assert not index_path.with_suffix(".tmp").exists()
+    reloaded = SemanticCache(index_path=index_path, store=store, similarity_threshold=0.92, embedding_dim=16)
+    assert reloaded._index.ntotal == 2
+
+    # Failed FAISS temp write leaves prior on-disk index intact and cleans up .tmp
+    monkeypatch.undo()
+
+    def _fail_write(_index: object, _path: str) -> None:
+        Path(_path).write_bytes(b"corrupt")
+        raise RuntimeError("simulated disk full")
+
+    monkeypatch.setattr(faiss, "write_index", _fail_write)
+    with pytest.raises(RuntimeError):
+        cache.put(_unit_vec(16, 2), _make_record("req-fail-faiss"))
+
+    assert cache._index.ntotal == 2
+    assert not index_path.with_suffix(".tmp").exists()
+    reloaded_after = SemanticCache(
+        index_path=index_path, store=store, similarity_threshold=0.92, embedding_dim=16
+    )
+    assert reloaded_after._index.ntotal == 2
+
+
+def test_telemetry_store_query_audit_escapes_like_wildcards(tmp_path: Path) -> None:
+    store = TelemetryStore(tmp_path / "telemetry.db")
+    store.init_schema()
+    store.insert_request(_make_record("w1", query_text="100% coverage target"))
+    store.insert_request(_make_record("w2", query_text="snake_case identifier"))
+    store.insert_request(_make_record("w3", query_text="plain backslash \\ query"))
+    store.insert_request(_make_record("w4", query_text="ordinary text"))
+
+    pct_items, pct_total = store.query_audit(q="%")
+    assert pct_total == 1
+    assert [item["request_id"] for item in pct_items] == ["w1"]
+
+    underscore_items, underscore_total = store.query_audit(q="_")
+    assert underscore_total == 1
+    assert [item["request_id"] for item in underscore_items] == ["w2"]
+
+    slash_items, slash_total = store.query_audit(q="\\")
+    assert slash_total == 1
+    assert [item["request_id"] for item in slash_items] == ["w3"]
 

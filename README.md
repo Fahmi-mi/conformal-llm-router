@@ -1,6 +1,6 @@
 # Conformal Hallucination Control & Learned LLM Cost-Quality Router
 
-> **Status:** Project Specification / Blueprint (not yet implemented; evaluation result fields marked `TBD` until experiments are run).
+> **Status:** Implemented (Phases 1–4 complete: offline feature extraction, conformal risk calibration, Pareto router training, FastAPI gateway, SvelteKit monitoring console, and Docker Compose stack verified). Automated LLM-as-a-Judge audit remains `TBD` until `DEEPSEEK_API_KEY` or `GROQ_API_KEY` is configured.
 
 A **Statistical AI Control & LLMOps** platform that applies **Conformal Prediction**, **Bias-Corrected Evaluation**, and **Cost-Quality Routing** to make production LLM/RAG systems mathematically reliable and cost-efficient.
 
@@ -24,8 +24,8 @@ flowchart LR
     CACHE -->|Hit| RESP[Structured Response]
     CACHE -->|Miss| FEAT[Query & Context Feature Extractor<br/>CPU Embeddings + Complexity Signals]
     FEAT --> ROUTER[Learned Pareto Router<br/>LightGBM / Logistic Cost-Quality Classifier]
-    ROUTER -->|Tier 1: Fast / Cheap Model| LLM1[Small Model<br/>Groq Llama/Qwen or Local Ollama]
-    ROUTER -->|Tier 2: High-Capability Model| LLM2[Stronger Model<br/>Groq 70B / Gemini Flash]
+    ROUTER -->|Tier 1: Fast / Cheap Model| LLM1[Small Model<br/>Groq / Gemini / Local Ollama]
+    ROUTER -->|Tier 2: High-Capability Model| LLM2[Stronger Model<br/>DeepSeek]
     LLM1 --> RISK[Hallucination Risk Scorer]
     LLM2 --> RISK
     RISK --> CP[Conformal Guardrail - MAPIE<br/>Calibrated Risk <= alpha]
@@ -82,10 +82,12 @@ Offline training, statistical calibration, and large-scale benchmarking require 
 ## AI Engineering & Serving Layer
 
 ### FastAPI Gateway Endpoints
-- `POST /v1/query`: Executes semantic cache lookup -> learned router tier selection -> LLM call (Groq/Ollama/Gemini) -> conformal hallucination scorer -> returns `{answer, model_used, estimated_cost, calibrated_risk_score, conformal_decision: "PASS" | "ABSTAIN", latency_ms}`.
+- `POST /v1/query`: Executes semantic cache lookup -> learned router tier selection -> LLM call (Tier 1: Groq/Gemini/Ollama fallback chain; Tier 2: DeepSeek) -> conformal hallucination scorer -> returns `{request_id, answer, model_used, tier, provider, estimated_cost_usd, calibrated_risk_score, conformal_decision: "PASS" | "ABSTAIN" | "UNSCORED", latency_ms}`.
 - `POST /v1/evaluate-risk`: Standalone conformal guardrail endpoint to score and gate any `(query, context, candidate_answer)` tuple.
-- `GET /v1/telemetry/pareto`: Aggregates logged requests to compare realized cost savings, abstention rate, latency `p50/p95`, and cache hit rate.
-- `GET /health`: Checks model artifacts, embedding model readiness, cache backend, and upstream provider reachability.
+- `GET /v1/telemetry/pareto`: Aggregates logged requests to compare realized cost savings, abstention rate, latency `p50/p95`, and cache hit rate alongside the offline Pareto curve.
+- `GET /v1/telemetry/audit`: Paginated and filterable audit log of logged inference requests (`decision`, `tier`, `cache_hit`, `q`, `limit`, `offset`).
+- `GET /v1/benchmarks/summary`: Returns offline Phase 1–3 benchmark artifact summaries (`judge_audit`, `conformal`, `risk_metrics`, `pareto`).
+- `GET /health`: Checks model artifacts, embedding/NLI model readiness, SQLite/FAISS storage, and upstream provider configuration.
 
 ### Guardrails & Production Reliability
 - **Graceful Rate-Limit Fallback:** Automatic fallback across free-tier providers or cached responses when hitting `429` rate limits during demos.
@@ -98,7 +100,7 @@ Offline training, statistical calibration, and large-scale benchmarking require 
 
 ---
 
-## Proposed Repository Structure
+## Repository Structure
 
 ```text
 conformal-llm-router/
@@ -125,39 +127,92 @@ conformal-llm-router/
 │   └── gateway/
 │       ├── main.py                  # FastAPI inference & guardrail gateway
 │       ├── cache.py                 # FAISS/SQLite semantic cache
-│       ├── providers.py             # Groq / Gemini / Ollama unified async clients
-│       └── schemas.py               # Pydantic request/response/telemetry models
-├── dashboard/                       # Streamlit or SvelteKit Pareto & calibration UI
+│       ├── providers.py             # Groq / Gemini / Ollama (Tier 1) & DeepSeek (Tier 2) async clients
+│       ├── schemas.py               # Pydantic request/response/telemetry models
+│       └── storage.py               # SQLite telemetry store & Pareto aggregation
+├── dashboard/                       # SvelteKit Pareto & calibration UI
 ├── tests/
 │   ├── test_conformal.py            # Empirical coverage & abstention boundary tests
 │   ├── test_router.py               # Routing constraint & fallback tests
-│   └── test_gateway.py              # FastAPI endpoint, cache hit, & 429 fallback tests
+│   ├── test_gateway.py              # FastAPI endpoint, cache hit, & 429 fallback tests
+│   └── test_gateway_storage.py      # Gateway schemas, SQLite telemetry, & FAISS cache tests
+├── .dockerignore
 ├── Dockerfile
+├── docker-compose.yml
+├── DESIGN.md
 ├── pyproject.toml
 └── README.md
 ```
 
 ---
 
-## Target Experiment Results (To Populate After Runs)
+## Quickstart (Local & Docker Compose)
 
-### Conformal Hallucination Control (`RAGTruth` Test Split)
+### Option A: Docker Compose (Gateway + Dashboard)
+
+```sh
+cp .env.example .env   # optional: add DEEPSEEK_API_KEY / GROQ_API_KEY / GEMINI_API_KEY
+docker compose up --build
+```
+
+- FastAPI Gateway: `http://localhost:8000` (health check: `GET /health`, docs: `/docs`)
+- SvelteKit Monitoring Console: `http://localhost:3000`
+- Host Ollama inside Docker routes to `http://host.docker.internal:11434` by default (override via `DOCKER_OLLAMA_BASE_URL` in `.env`).
+
+### Option B: Local Development (`uv` + `npm`)
+
+```sh
+# 1. Start the FastAPI inference & guardrail gateway
+uv sync --frozen
+uv run uvicorn src.gateway.main:app --host 0.0.0.0 --port 8000 --reload
+
+# 2. Start the SvelteKit monitoring dashboard (in a separate terminal)
+npm --prefix dashboard install
+npm --prefix dashboard run dev
+```
+
+Run tests & checks:
+
+```sh
+uv run pytest -v
+uv run ruff check src/ tests/
+npm --prefix dashboard run check && npm --prefix dashboard test
+```
+
+---
+
+## Experiment Results (Measured Phase 2–3 Runs)
+
+### Judge Bias Audit (`RAGTruth`)
+
+- **Status:** `TBD` (`sample_size: 0` / `requested_sample_size: 300` in `artifacts/judge_audit_summary.json`; requires `DEEPSEEK_API_KEY` or `GROQ_API_KEY` in `.env` to run live automated judge scoring).
+
+### Conformal Hallucination Control (`RAGTruth` Test Split, $n_{\text{test}} = 2{,}700$)
+
+Split sizes: `train = 12,072`, `cal = 3,018`, `test = 2,700` (from `artifacts/risk_metrics.json`).
 
 | Guardrail Method | Target Risk $\alpha$ | Empirical False-Accept Rate | Abstention Rate | Brier Score |
 |---|---|---|---|---|
-| Uncalibrated Heuristic Threshold | N/A | TBD | TBD | TBD |
-| Logistic + Split Conformal (MAPIE) | 0.10 | TBD | TBD | TBD |
-| LightGBM + Split Conformal (MAPIE) | 0.10 | TBD | TBD | TBD |
-| LightGBM + Split Conformal (MAPIE) | 0.05 | TBD | TBD | TBD |
+| Uncalibrated Heuristic Threshold (`0.50`) | N/A | 13.52% (`0.1352`) | 34.52% (`0.3452`) | 0.1963 |
+| Logistic + Split Conformal (MAPIE) | 0.10 | 4.67% (`0.0467`) | 65.37% (`0.6537`) | 0.1894 |
+| Logistic + Split Conformal (MAPIE) | 0.05 | 2.33% (`0.0233`) | 76.59% (`0.7659`) | 0.1894 |
+| LightGBM + Split Conformal (MAPIE) | 0.10 | 4.15% (`0.0415`) | 63.15% (`0.6315`) | 0.1734 |
+| LightGBM + Split Conformal (MAPIE) | 0.05 | 1.96% (`0.0196`) | 74.93% (`0.7493`) | 0.1734 |
 
-### Cost-Quality Routing (`RouterBench`)
+- **Calibration ECE:** Uncalibrated Heuristic `0.0650`, Logistic `0.0775`, LightGBM `0.0761`. Both conformal guardrails strictly satisfy empirical false-accept rate $\le \alpha$ at $\alpha \in \{0.05, 0.10\}$, with LightGBM achieving lower abstention and Brier score than Logistic.
+
+### Cost-Quality Routing (`RouterBench`, $n_{\text{test}} = 7{,}214$)
+
+Split sizes: `train = 21,642`, `test = 7,214`, OOD holdout (`mbpp`) `= 427` (from `artifacts/pareto_sweep.json`).
 
 | Routing Strategy | Avg Quality Score | Avg Cost vs. Frontier (%) | Cost Savings (%) |
 |---|---|---|---|
-| Always Frontier Model | TBD | 100% | 0% |
-| Always Small Model | TBD | TBD | TBD |
-| Random Router | TBD | TBD | TBD |
-| Learned Pareto Router | TBD | TBD | TBD |
+| Always Frontier Model | 0.7780 | 100.00% | 0.00% |
+| Always Small Model | 0.3071 | 1.43% | 98.57% |
+| Random Router | 0.5373 | 49.93% | 50.07% |
+| Learned Pareto Router ($\lambda_{\text{cost}} = 0.45$) | 0.7480 | 91.50% | 8.50% |
+
+- **Pareto Summary:** In-domain `AUC-QC = 0.5206` and **8.50%** cost savings at $\ge 95\%$ frontier quality (`0.7480 / 0.7780 = 96.14%` quality retention at $\lambda_{\text{cost}} = 0.45$). On the held-out OOD `mbpp` task (`n = 427`), `AUC-QC = 0.5148` with **3.07%** cost savings at $\ge 95\%$ frontier quality.
 
 ---
 
@@ -166,4 +221,4 @@ conformal-llm-router/
 1. **Phase 1: Benchmark Ingestion & Feature Extraction:** Download `RAGTruth` and `RouterBench`; compute CPU-friendly semantic/overlap risk features into Parquet.
 2. **Phase 2: Judge Audit & Conformal Calibration:** Run judge-bias analysis; train hallucination risk classifiers and calibrate finite-sample risk guarantees with `MAPIE`.
 3. **Phase 3: Learned Pareto Router:** Train cost-quality routers on `RouterBench`, measure out-of-domain robustness, and plot Pareto frontiers.
-4. **Phase 4: Inference Gateway, UI & Tests:** Build FastAPI gateway with semantic caching + live Groq/Gemini/Ollama routing + conformal abstention, add unit/API tests, and populate benchmark tables.
+4. **Phase 4: Inference Gateway, UI & Tests:** Build FastAPI gateway with semantic caching + live Groq/Gemini/Ollama/DeepSeek routing + conformal abstention, add unit/API tests, and populate benchmark tables.

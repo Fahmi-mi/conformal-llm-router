@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -168,22 +169,27 @@ class FeatureExtractor:
         self.config = config or FeatureExtractorConfig()
         self._embedder = embedder
         self._nli_model = nli_model
+        self._model_lock = threading.Lock()
 
     def _get_embedder(self) -> Any:
         if self._embedder is None:
-            from sentence_transformers import SentenceTransformer
+            with self._model_lock:
+                if self._embedder is None:
+                    from sentence_transformers import SentenceTransformer
 
-            self._embedder = SentenceTransformer(self.config.embed_model)
+                    self._embedder = SentenceTransformer(self.config.embed_model)
         return self._embedder
 
     def _get_nli_model(self) -> Any:
         if self._nli_model is None:
-            from sentence_transformers import CrossEncoder
+            with self._model_lock:
+                if self._nli_model is None:
+                    from sentence_transformers import CrossEncoder
 
-            self._nli_model = CrossEncoder(
-                self.config.nli_model,
-                max_length=self.config.nli_max_length,
-            )
+                    self._nli_model = CrossEncoder(
+                        self.config.nli_model,
+                        max_length=self.config.nli_max_length,
+                    )
         return self._nli_model
 
     def _encode_texts(self, texts: list[str]) -> np.ndarray:

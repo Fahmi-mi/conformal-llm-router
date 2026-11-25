@@ -202,14 +202,19 @@
 					<tbody>
 						{#each comparisonRows as row}
 							{@const targetAlpha = row.target_alpha ?? row.alpha ?? null}
-							{@const violates = targetAlpha !== null && row.false_accept_rate > targetAlpha}
+							{@const farColorClass =
+								targetAlpha === null
+									? 'text-[#1C2721]'
+									: row.false_accept_rate <= targetAlpha
+										? 'text-[#236B52]'
+										: 'text-[#B84A39]'}
 							<tr class="border-b border-[#ECE7DC]">
 								<td class="py-2.5 px-2 font-medium text-[#1C2721]">{row.guardrail_method}</td>
 								<td class="py-2.5 px-2 text-right font-mono-data">
 									{targetAlpha !== null ? targetAlpha.toFixed(2) : 'N/A'}
 								</td>
 								<td class="py-2.5 px-2 text-right font-mono-data">{row.threshold.toFixed(4)}</td>
-								<td class="py-2.5 px-2 text-right font-mono-data {violates ? 'text-[#B84A39] font-semibold' : 'text-[#236B52] font-semibold'}">
+								<td class="py-2.5 px-2 text-right font-mono-data font-semibold {farColorClass}">
 									{formatPct(row.false_accept_rate, 2)}
 								</td>
 								<td class="py-2.5 px-2 text-right font-mono-data">{formatPct(row.abstention_rate, 1)}</td>

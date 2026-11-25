@@ -104,6 +104,24 @@ def _load_offline_pareto_curve(path: Path) -> list[dict[str, Any]]:
     return payload if isinstance(payload, list) else []
 
 
+def _load_benchmarks_summary(artifacts_dir: Path) -> BenchmarksSummaryResponse:
+    return BenchmarksSummaryResponse(
+        judge_audit=_load_json_artifact(artifacts_dir / "judge_audit_summary.json"),
+        conformal=_load_json_artifact(artifacts_dir / "conformal_sweep.json"),
+        risk_metrics=_load_json_artifact(artifacts_dir / "risk_metrics.json"),
+        pareto=_load_json_artifact(artifacts_dir / "pareto_sweep.json"),
+    )
+
+
+def _ping_sqlite(store: TelemetryStore) -> bool:
+    try:
+        with store._connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+        return True
+    except (sqlite3.Error, OSError):
+        return False
+
+
 def _build_evidence(
     rag_df: pd.DataFrame,
     threshold: float,
@@ -140,7 +158,6 @@ def _check_valid_cache_hit(
     *,
     context_text: str | None,
     predicted_tier: Literal["tier1", "tier2"],
-    lambda_cost_override: float | None,
     alpha_used: float,
     calibrator: ConformalBundle,
 ) -> tuple[bool, EvidenceBreakdown | None]:
@@ -154,7 +171,10 @@ def _check_valid_cache_hit(
     if context_text is not None and cached.get("conformal_decision") == "UNSCORED":
         return False, None
 
-    if lambda_cost_override is not None and predicted_tier != cached.get("tier"):
+    cached_predicted_tier = (
+        "tier1" if cached.get("escalated_from_tier1") else cached.get("tier")
+    )
+    if predicted_tier != cached_predicted_tier:
         return False, None
 
     if context_text is None:
@@ -299,17 +319,31 @@ def create_app(
         prob_tier1 = float(predict_tier1_probability(rt.router, q_embs, q_meta_df)[0])
         predicted_tier = select_tier(prob_tier1, lambda_cost_used)
 
+        assert rt.calibrator is not None
+        calibrator = rt.calibrator
+
+        def _is_valid_cache_hit(candidate: dict[str, Any]) -> bool:
+            ok, _ = _check_valid_cache_hit(
+                candidate,
+                context_text=context_text,
+                predicted_tier=predicted_tier,
+                alpha_used=alpha_used,
+                calibrator=calibrator,
+            )
+            return ok
+
         cached_record = None
         if not req.bypass_cache:
-            cached_record = await run_in_threadpool(rt.cache.lookup, query_emb)
+            cached_record = await run_in_threadpool(
+                rt.cache.lookup, query_emb, _is_valid_cache_hit
+            )
 
         is_hit, hit_evidence = _check_valid_cache_hit(
             cached_record,
             context_text=context_text,
             predicted_tier=predicted_tier,
-            lambda_cost_override=req.lambda_cost_override,
             alpha_used=alpha_used,
-            calibrator=rt.calibrator,
+            calibrator=calibrator,
         )
 
         request_id = str(uuid4())
@@ -382,7 +416,11 @@ def create_app(
                 alpha_used,
             )
 
-            if conformal_decision == "ABSTAIN" and predicted_tier == "tier1":
+            if (
+                conformal_decision == "ABSTAIN"
+                and predicted_tier == "tier1"
+                and rt.provider_router.available_providers().get("deepseek")
+            ):
                 res_tier2 = await rt.provider_router.generate("tier2", req.query, context_text)
                 escalated_from_tier1 = True
                 tier_used = "tier2"
@@ -499,8 +537,8 @@ def create_app(
         summary = await run_in_threadpool(
             rt.store.aggregate_pareto, alpha_val, lambda_val
         )
-        summary["offline_curve"] = _load_offline_pareto_curve(
-            cfg.artifacts_dir / "pareto_sweep.json"
+        summary["offline_curve"] = await run_in_threadpool(
+            _load_offline_pareto_curve, cfg.artifacts_dir / "pareto_sweep.json"
         )
         return ParetoTelemetryResponse(**summary)
 
@@ -533,12 +571,7 @@ def create_app(
 
     @app.get("/v1/benchmarks/summary", response_model=BenchmarksSummaryResponse)
     async def benchmarks_summary_endpoint() -> BenchmarksSummaryResponse:
-        return BenchmarksSummaryResponse(
-            judge_audit=_load_json_artifact(cfg.artifacts_dir / "judge_audit_summary.json"),
-            conformal=_load_json_artifact(cfg.artifacts_dir / "conformal_sweep.json"),
-            risk_metrics=_load_json_artifact(cfg.artifacts_dir / "risk_metrics.json"),
-            pareto=_load_json_artifact(cfg.artifacts_dir / "pareto_sweep.json"),
-        )
+        return await run_in_threadpool(_load_benchmarks_summary, cfg.artifacts_dir)
 
     @app.get("/health", response_model=HealthResponse)
     async def health_endpoint() -> HealthResponse:
@@ -548,13 +581,7 @@ def create_app(
         assert rt.extractor is not None
         assert rt.provider_router is not None
 
-        sqlite_ok = False
-        try:
-            with rt.store._connect() as conn:
-                conn.execute("SELECT 1").fetchone()
-            sqlite_ok = True
-        except (sqlite3.Error, OSError):
-            sqlite_ok = False
+        sqlite_ok = await run_in_threadpool(_ping_sqlite, rt.store)
 
         faiss_ok = getattr(rt.cache, "_index", None) is not None
         artifacts = {

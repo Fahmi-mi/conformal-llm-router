@@ -40,6 +40,16 @@ class QueryRequest(BaseModel):
     def _validate_query(cls, value: str) -> str:
         return _require_non_blank(value)
 
+    @field_validator("context", mode="before")
+    @classmethod
+    def _normalize_context(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped if stripped else None
+        return value
+
 
 class QueryResponse(BaseModel):
     """Gateway response returned by POST /v1/query."""
