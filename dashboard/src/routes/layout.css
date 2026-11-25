@@ -1,0 +1,122 @@
+@import 'tailwindcss';
+
+:root {
+	--color-ground: #f6f3ec;
+	--color-surface: #fcfbf8;
+	--color-surface-inset: #efece3;
+	--color-rail: #1c2721;
+	--color-rail-hover: #24322b;
+	--color-rail-active: #2a3a31;
+	--color-rail-border: #2f4036;
+	--color-ink: #1c2721;
+	--color-ink-muted: #5c6860;
+	--color-ink-rail: #ede8dc;
+	--color-ink-rail-muted: #a9b8ae;
+	--color-border: #dcd6c8;
+	--color-border-subtle: #ece7dc;
+	--color-pass: #236b52;
+	--color-pass-bg: #e4f2ec;
+	--color-pass-ink: #1b5642;
+	--color-abstain: #b84a39;
+	--color-abstain-bg: #fbe9e7;
+	--color-synthetic: #b46914;
+	--color-synthetic-bg: #fdf6e9;
+	--color-synthetic-ink: #8f520e;
+	--color-coral: #d97757;
+	--font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+	--font-mono: ui-monospace, 'SFMono-Regular', Menlo, Monaco, Consolas, monospace;
+}
+
+html,
+body {
+	background-color: var(--color-ground);
+	color: var(--color-ink);
+	font-family: var(--font-sans);
+	font-variant-numeric: tabular-nums;
+	caret-color: var(--color-pass);
+	text-underline-offset: 3px;
+	scrollbar-color: #c8c0b0 var(--color-surface-inset);
+	scrollbar-width: thin;
+}
+
+::selection {
+	background-color: var(--color-pass);
+	color: #faf8f3;
+}
+
+:focus-visible {
+	outline: 2px solid var(--color-pass);
+	outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+::-webkit-scrollbar-track {
+	background: var(--color-surface-inset);
+}
+
+::-webkit-scrollbar-thumb {
+	background: #c8c0b0;
+	border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: #9e9686;
+}
+
+.font-mono-data {
+	font-family: var(--font-mono);
+	font-variant-numeric: tabular-nums;
+}
+
+.specimen-panel {
+	background-color: var(--color-surface);
+	border: 1px solid var(--color-border);
+	border-radius: 3px;
+}
+
+.specimen-slider {
+	-webkit-appearance: none;
+	appearance: none;
+	height: 6px;
+	border-radius: 2px;
+	background: #e3ddd0;
+	cursor: pointer;
+}
+
+.specimen-slider::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	appearance: none;
+	width: 14px;
+	height: 14px;
+	border-radius: 2px;
+	background: var(--color-ink);
+	border: 1px solid var(--color-surface);
+	cursor: pointer;
+	transition: background-color 150ms ease;
+}
+
+.specimen-slider::-webkit-slider-thumb:hover {
+	background: var(--color-pass);
+}
+
+.specimen-slider::-moz-range-thumb {
+	width: 14px;
+	height: 14px;
+	border-radius: 2px;
+	background: var(--color-ink);
+	border: 1px solid var(--color-surface);
+	cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		transition-duration: 0.01ms !important;
+	}
+}
